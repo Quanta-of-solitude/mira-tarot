@@ -1,0 +1,25 @@
+{
+  "name": "mira-tarot",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "db:setup": "node --env-file=.env.local scripts/setup-db.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.9.0",
+    "@neondatabase/serverless": "^1.2.1",
+    "next": "^16.4.6",
+    "next-auth": "5.0.0-beta.32",
+    "nodemailer": "^7.0.13",
+    "razorpay": "^2.9.8",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "three": "^0.187.0"
+  },
+  "engines": {
+    "node": "22.x"
+  }
+}
