@@ -37,7 +37,7 @@ export default function TarotRoom() {
   const run = useRef(0), readingId = useRef(null), sayTok = useRef(0), queue = useRef(Promise.resolve()), skipBreath = useRef(null), meRef = useRef(null), forceRef = useRef(force);
   meRef.current = me; forceRef.current = force;
 
-  /* Mira speaks: subtitle + mouth + (if sound is on) voice. Resolves when the line is finished. */
+  /* Mira speaks: subtitle + moving lips (no spoken voice). Resolves when the line has had time to be read. */
   const say = useCallback((text) => {
     const tok = ++sayTok.current; setLine(text); sceneRef.current?.setTalking(true);
     return audio.speak(text).then(() => { if (sayTok.current === tok) sceneRef.current?.setTalking(false); });
@@ -159,7 +159,6 @@ export default function TarotRoom() {
     await scene.reveal(i, card, reversed);
     if (run.current !== r) return;
     setPhase("reading"); setReading({ card, reversed, question: question.trim(), text: "", done: false });
-    enqueue(`${card.name}${reversed ? ", reversed" : ""}.`, r);
     streamReading(readingId.current, r);
   }
 
@@ -452,7 +451,7 @@ export default function TarotRoom() {
           <label>Breathing and cut
             <select value={force.ritual} onChange={(e) => setForce({ ...force, ritual: e.target.value })}><option value="on">Play it</option><option value="off">Skip it</option></select>
           </label>
-          <p className="fine">Signed in as {me.email}. Admin readings are free. Readings: {cfg?.aiEnabled ? "written by Claude" : "fixed text (no API key)"}.</p>
+          <p className="fine">Signed in as {me.email}. Admin readings are free.</p>
           <button onClick={() => setModal(null)}>Close</button>
         </div>
       )}

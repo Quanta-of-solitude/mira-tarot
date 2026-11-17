@@ -4,7 +4,7 @@ An immersive 3D tarot reading. Mira shuffles, deals three cards, and reads the o
 Three free readings per account, then paid question packs through Cashfree (UPI, cards, netbanking).
 
 Built with Next.js (App Router) for Vercel, Three.js, Auth.js (email code sign-in), Neon Postgres,
-Cashfree and the Claude API.
+and Cashfree. Readings are composed by the app itself, with no AI service.
 
 ## Run it locally (no accounts needed)
 
@@ -17,7 +17,6 @@ Needs Node 22. With no environment variables set, the app runs in a development 
 
 - sign-in codes are shown on screen and in the server log instead of being emailed
 - data lives in memory and resets when the server restarts
-- readings use fixed text for each card
 - the buy buttons report that payments are not set up
 
 Each of those switches to the real thing as soon as its keys are present in `.env.local`
@@ -48,8 +47,6 @@ When you open it to other people, add:
 - **Sign-in email:** users get a 6-digit code by email. Any SMTP account works. With Gmail: turn on
   2-step verification, create an app password at https://myaccount.google.com/apppasswords, and set
   `SMTP_USER` (your Gmail) and `SMTP_PASS` (the app password). Gmail allows about 500 emails a day.
-- **Readings by Claude:** `ANTHROPIC_API_KEY`. `READING_MODEL` is optional (default `claude-opus-5-5`;
-  `claude-haiku-5-5` costs far less per reading). Without it, each card has a fixed reading.
 - **Payments with Cashfree:** sign up at cashfree.com as an **Individual** with your personal PAN,
   Aadhaar (linked to your phone) and bank account; no GST or company is needed. Developers > API Keys
   gives `CASHFREE_APP_ID` and `CASHFREE_SECRET_KEY`. Test with the sandbox keys and `CASHFREE_ENV=sandbox`,
@@ -76,7 +73,7 @@ When you open it to other people, add:
 | `components/scene.js` | The 3D room, Mira, the cards and all animation |
 | `components/TarotRoom.jsx` | The interface and the reading flow |
 | `lib/tarot.js` | The deck, pack prices (`PACKS`), free credits (`FREE_CREDITS`) |
-| `lib/reading.js` | Mira's voice: the Claude prompt and streaming |
+| `lib/oracle.js`, `lib/oracle-cards.js` | Mira's readings: how the question is read, and what each card says |
 | `lib/store.js` | All database access |
 | `app/api/pay/*`, `lib/cashfree.js` | Payment order, verification and webhook |
 | `app/api/auth/code`, `lib/email.js` | Email sign-in codes |

@@ -5,6 +5,9 @@ import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
+import { ShaderPass } from "three/examples/jsm/postprocessing/ShaderPass.js";
+import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { emblemSVG } from "@/lib/tarot";
 import { audio } from "@/lib/audio";
 
@@ -20,10 +23,20 @@ export function createScene(canvas, hooks) {
   renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   const scene = new THREE.Scene(); scene.background = C(0x0b0609); scene.fog = new THREE.FogExp2(0x0b0609, 0.13);
   const camera = new THREE.PerspectiveCamera(40, 1, 0.05, 40);
-  const composer = new EffectComposer(renderer);
+  // Soft reflections for gold, glass and glossy eyes.
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture; scene.environmentIntensity = 0.22;
+  // Anti-aliased render target, bloom for the flames, then a gentle vignette and film grain.
+  const composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 }));
   composer.addPass(new RenderPass(scene, camera));
-  const bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.5, 0.7, 0.82);
+  const bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.45, 0.7, 0.85);
   composer.addPass(bloom); composer.addPass(new OutputPass());
+  const grade = new ShaderPass({
+    uniforms: { tDiffuse: { value: null }, time: { value: 0 } },
+    vertexShader: "varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }",
+    fragmentShader: "uniform sampler2D tDiffuse; uniform float time; varying vec2 vUv; float rnd(vec2 p){ return fract(sin(dot(p, vec2(12.9898, 78.233)) + time) * 43758.5453); } void main(){ vec4 c = texture2D(tDiffuse, vUv); float d = distance(vUv, vec2(0.5, 0.48)); c.rgb *= mix(1.0, 0.74, smoothstep(0.35, 0.85, d)); c.rgb += (rnd(vUv * 1000.0) - 0.5) * 0.028; gl_FragColor = c; }",
+  });
+  composer.addPass(grade);
 
   const clock = new THREE.Clock(); let t = 0, raf = 0, disposed = false;
   const camBase = V(0, 1.78, 3.45), camLook = V(0, 0.96, -0.1), camPos = V(0, 2.5, 7);
@@ -44,95 +57,401 @@ export function createScene(canvas, hooks) {
   const additive = (map, extra = {}) => new THREE.SpriteMaterial({ map, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, ...extra });
 
   /* ---------- materials ---------- */
+  // Same seeded random for every pass of a texture, so colour and gloss maps line up.
+  const seeded = (s) => () => { s = (s * 16807) % 2147483647; return s / 2147483647; };
+  // Draws one design twice: a colour map and an "ORM" map (green = roughness, blue = metalness).
+  function texturePair(w, h, draw) {
+    const mk = () => { const c = document.createElement("canvas"); c.width = w; c.height = h; return c; };
+    const cc = mk(), oc = mk(); draw(cc.getContext("2d"), "color", w, h); draw(oc.getContext("2d"), "orm", w, h);
+    const map = new THREE.CanvasTexture(cc); map.colorSpace = THREE.SRGBColorSpace; map.anisotropy = 8;
+    return { map, orm: new THREE.CanvasTexture(oc) };
+  }
+  const goldFill = (g, pass, x0, y0, x1, y1) => {
+    if (pass !== "color") return "rgb(0,80,255)";
+    const gr = g.createLinearGradient(x0, y0, x1, y1); gr.addColorStop(0, "#f6d993"); gr.addColorStop(0.45, "#b8873c"); gr.addColorStop(0.7, "#f2d088"); gr.addColorStop(1, "#a87a34"); return gr;
+  };
   const M = {
-    skin: new THREE.MeshPhysicalMaterial({ color: C(0xb5764f), roughness: 0.5, sheen: 0.4, sheenColor: C(0xffc9a0), sheenRoughness: 0.5 }),
-    skinDark: new THREE.MeshStandardMaterial({ color: C(0x9a5f3e), roughness: 0.6 }),
-    robe: new THREE.MeshPhysicalMaterial({ color: C(0x5c1629), roughness: 0.8, sheen: 1, sheenColor: C(0xb03a5c), sheenRoughness: 0.4, side: THREE.DoubleSide }),
-    cloak: new THREE.MeshStandardMaterial({ color: C(0x2b0b16), roughness: 0.9, side: THREE.DoubleSide }),
-    hair: new THREE.MeshStandardMaterial({ color: C(0x120a0c), roughness: 0.4, side: THREE.DoubleSide }),
-    gold: new THREE.MeshStandardMaterial({ color: C(0xd9ae62), metalness: 0.9, roughness: 0.28, emissive: C(0x3a2508) }),
-    white: new THREE.MeshStandardMaterial({ color: C(0xf3ebe0), roughness: 0.25 }),
-    iris: new THREE.MeshStandardMaterial({ color: C(0x3a1d0e), roughness: 0.2 }),
-    black: new THREE.MeshStandardMaterial({ color: C(0x0a0506), roughness: 0.3 }),
-    lips: new THREE.MeshStandardMaterial({ color: C(0x8e2c41), roughness: 0.35 }),
-    gem: new THREE.MeshStandardMaterial({ color: C(0xb0213f), roughness: 0.1, emissive: C(0x50081a) }),
+    skinPlain: new THREE.MeshPhysicalMaterial({ color: C(0xb0714c), roughness: 0.55, sheen: 0.35, sheenColor: C(0xffb59a), sheenRoughness: 0.6 }),
+    lid: new THREE.MeshPhysicalMaterial({ color: C(0x8f5440), roughness: 0.6, sheen: 0.3, sheenColor: C(0xffb59a) }),
+    velvet: new THREE.MeshPhysicalMaterial({ color: C(0x4e1123), roughness: 0.85, sheen: 1, sheenColor: C(0xb03a5c), sheenRoughness: 0.35, side: THREE.DoubleSide }),
+    cloak: new THREE.MeshPhysicalMaterial({ color: C(0x220810), roughness: 0.9, sheen: 1, sheenColor: C(0x6a1d33), sheenRoughness: 0.35, side: THREE.DoubleSide }),
+    gold: new THREE.MeshStandardMaterial({ color: C(0xe0b468), metalness: 1, roughness: 0.26 }),
+    gem: new THREE.MeshPhysicalMaterial({ color: C(0xb0213f), roughness: 0.05, clearcoat: 1, emissive: C(0x40061a) }),
+    pearl: new THREE.MeshPhysicalMaterial({ color: C(0xf3eadb), roughness: 0.25, sheen: 1, sheenColor: C(0xffffff), clearcoat: 0.6 }),
+    black: new THREE.MeshStandardMaterial({ color: C(0x0a0506), roughness: 0.4 }),
+    dark: new THREE.MeshStandardMaterial({ color: C(0x2a0a10), roughness: 0.8 }),
+    lips: new THREE.MeshPhysicalMaterial({ color: C(0x86283b), roughness: 0.35, clearcoat: 0.4, clearcoatRoughness: 0.4 }),
     spark: new THREE.MeshBasicMaterial({ color: 0xffffff }),
-    wax: new THREE.MeshStandardMaterial({ color: C(0xeadcbc), roughness: 0.6, emissive: C(0x3a2410) }),
+    wax: new THREE.MeshPhysicalMaterial({ color: C(0xeadcbc), roughness: 0.55, sheen: 0.5, sheenColor: C(0xfff0d0), emissive: C(0x3a2410) }),
   };
 
   /* ---------- Mira ---------- */
   const mira = {};
+  // Her head is a soft oval with a gentle jaw and chin. Her features are painted on a face layer
+  // that redraws when she blinks, glances or speaks, so her expression always stays soft.
+  const HS = V(0.115, 0.136, 0.13);
+  const YU = 0.97, YD = 1.02; // vertical stretch above / below the eye line
+  const clamp = THREE.MathUtils.clamp;
+  const gauss = (dx, dy, s) => Math.exp(-(dx * dx + dy * dy) / s);
+  const smooth = (k) => k * k * (3 - 2 * k);
+  const jawK = (y) => smooth(clamp((-y - 0.18) / 0.84, 0, 1)); // the jaw narrows only below the nose
+  function sculpt(v) {
+    let x = v.x, y = v.y * (v.y > 0 ? YU : YD), z = v.z, kk = 0;
+    if (y < 0) { kk = jawK(y); x *= 1 - 0.26 * kk; z *= 1 - 0.05 * kk; }
+    if (z < 0) z *= 1.05;
+    if (z > 0.5) z = 0.5 + (z - 0.5) * 0.8;
+    if (z > 0) {
+      if (y < 0 && z > 0.3) z += 0.07 * kk * Math.exp(-(x * x) / 0.25);                           // rounded jaw front
+      z -= 0.022 * (gauss(x - 0.33, y - 0.07, 0.03) + gauss(x + 0.33, y - 0.07, 0.03));          // soft eye hollows
+      const ny = clamp((0.02 - y) / 0.29, 0, 1), fall = y < -0.27 ? Math.exp(-((y + 0.27) ** 2) / 0.003) : 1;
+      z += 0.07 * Math.pow(ny, 1.4) * fall * Math.exp(-(x * x) / (0.006 + 0.014 * ny));          // small, straight nose
+      z += 0.03 * (gauss(x - 0.42, y + 0.12, 0.05) + gauss(x + 0.42, y + 0.12, 0.05));           // cheeks
+      z += 0.016 * Math.exp(-(x * x) / 0.03 - ((y + 0.57) ** 2) / 0.008);                       // lips
+      z += 0.028 * Math.exp(-(x * x) / 0.05 - ((y + 0.92) ** 2) / 0.012);                       // chin
+    }
+    return V(x * HS.x, y * HS.y, z * HS.z);
+  }
+  // Point on the unit sphere that sculpts to face coordinates (x, y).
+  function unitFor(xs, ys) {
+    const uy = clamp(ys / (ys > 0 ? YU : YD), -0.99, 0.99);
+    let ux = xs; if (ys < 0) ux = xs / (1 - 0.26 * jawK(ys));
+    return V(ux, uy, Math.sqrt(Math.max(0.0001, 1 - ux * ux - uy * uy)));
+  }
+  const fp = (xs, ys) => sculpt(unitFor(xs, ys));
+
+  // Skin: warm, even tone with soft contouring, painted on the head sphere's UVs (u = 0.25 is the front).
+  const SKIN = "#c4876a";
+  const FW = 2048, FH = 1024;
+  function faceUV(xs, ys) { const u = unitFor(xs, ys); return [(0.25 + Math.atan2(u.x, u.z) / (2 * PI)) * FW, (Math.acos(u.y) / PI) * FH]; }
+  const faceTex = canvasTex(FW, FH, (g) => {
+    const r = seeded(5);
+    g.fillStyle = SKIN; g.fillRect(0, 0, FW, FH);
+    for (let i = 0; i < 2500; i++) { g.fillStyle = `rgba(${r() < 0.5 ? "150,80,60" : "235,180,150"},${r() * 0.035})`; g.beginPath(); g.arc(r() * FW, r() * FH, 2 + r() * 10, 0, 7); g.fill(); }
+    const blob = (xs, ys, rx, ry, rgb, a) => {
+      const [x, y] = faceUV(xs, ys), gr = g.createRadialGradient(x, y, 0, x, y, rx);
+      gr.addColorStop(0, `rgba(${rgb},${a})`); gr.addColorStop(1, `rgba(${rgb},0)`);
+      g.save(); g.translate(x, y); g.scale(1, ry / rx); g.translate(-x, -y); g.fillStyle = gr; g.beginPath(); g.arc(x, y, rx, 0, 7); g.fill(); g.restore();
+    };
+    blob(0, -1.05, 300, 110, "110,55,40", 0.35);
+    blob(0, 0.55, 240, 100, "235,190,160", 0.16);
+  });
+  faceTex.anisotropy = 8;
+  M.skin = new THREE.MeshPhysicalMaterial({ map: faceTex, roughness: 0.5, sheen: 0.4, sheenColor: C(0xffbfa5), sheenRoughness: 0.6, clearcoat: 0.06, clearcoatRoughness: 0.6 });
+  M.skinPlain.color = C(SKIN);
+
+  // Face layer: a patch over the front of the head with its own canvas, so features get full resolution.
+  const PH0 = PI / 2 - 1.1, PHL = 2.2, TH0 = 0.45, THL = 2.35, FC = 1024;
+  function fpx(xs, ys) { const u = unitFor(xs, ys); return [((Math.atan2(u.z, -u.x) - PH0) / PHL) * FC, ((Math.acos(u.y) - TH0) / THL) * FC]; }
+  function spline(pts, n = 10) {
+    const out = [], f = (a, b, c, d, t) => 0.5 * (2 * b + (c - a) * t + (2 * a - 5 * b + 4 * c - d) * t * t + (3 * b - a - 3 * c + d) * t * t * t);
+    for (let i = 0; i < pts.length - 1; i++) {
+      const p0 = pts[Math.max(0, i - 1)], p1 = pts[i], p2 = pts[i + 1], p3 = pts[Math.min(pts.length - 1, i + 2)];
+      for (let k = 0; k < n; k++) out.push(fpx(f(p0[0], p1[0], p2[0], p3[0], k / n), f(p0[1], p1[1], p2[1], p3[1], k / n)));
+    }
+    const l = pts[pts.length - 1]; out.push(fpx(l[0], l[1])); return out;
+  }
+  const faceCanvas = document.createElement("canvas"); faceCanvas.width = faceCanvas.height = FC;
+  const fg = faceCanvas.getContext("2d");
+  const faceLayerTex = new THREE.CanvasTexture(faceCanvas); faceLayerTex.colorSpace = THREE.SRGBColorSpace; faceLayerTex.anisotropy = 8;
+  M.faceLayer = new THREE.MeshPhysicalMaterial({ map: faceLayerTex, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2, roughness: 0.45, sheen: 0.4, sheenColor: C(0xffbfa5), sheenRoughness: 0.6 });
+
+  // Eye shape for her left side (x > 0); the right side is mirrored.
+  const EYE_UP = [[0.185, 0.062], [0.24, 0.128], [0.33, 0.158], [0.43, 0.148], [0.505, 0.102]];
+  const EYE_SHUT = [[0.185, 0.062], [0.25, 0.05], [0.34, 0.042], [0.44, 0.055], [0.505, 0.102]];
+  const EYE_LOW = [[0.185, 0.062], [0.25, 0.03], [0.34, 0.016], [0.44, 0.034], [0.505, 0.102]];
+  const LIP_TOP = [[-0.165, -0.545], [-0.11, -0.506], [-0.042, -0.49], [0, -0.501], [0.042, -0.49], [0.11, -0.506], [0.165, -0.545]];
+  const LIP_SEAM = [[-0.165, -0.545], [-0.09, -0.551], [0, -0.555], [0.09, -0.551], [0.165, -0.545]];
+  const LIP_BOT = [[-0.165, -0.545], [-0.12, -0.584], [-0.05, -0.612], [0, -0.616], [0.05, -0.612], [0.12, -0.584], [0.165, -0.545]];
+
+  function drawFace(blink, open, gx, gy) {
+    const g = fg;
+    g.clearRect(0, 0, FC, FC);
+    const trace = (px, close) => { g.beginPath(); px.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y))); if (close) g.closePath(); };
+    const blob = (xs, ys, rx, ry, rgb, a) => {
+      const [x, y] = fpx(xs, ys), gr = g.createRadialGradient(x, y, 0, x, y, rx);
+      gr.addColorStop(0, `rgba(${rgb},${a})`); gr.addColorStop(1, `rgba(${rgb},0)`);
+      g.save(); g.translate(x, y); g.scale(1, ry / rx); g.translate(-x, -y); g.fillStyle = gr; g.beginPath(); g.arc(x, y, rx, 0, 7); g.fill(); g.restore();
+    };
+    const taper = (px, w0, w1, color, pow = 1) => {
+      g.strokeStyle = color; g.lineCap = "round";
+      for (let i = 1; i < px.length; i++) { g.lineWidth = w0 + (w1 - w0) * Math.pow(i / px.length, pow); g.beginPath(); g.moveTo(...px[i - 1]); g.lineTo(...px[i]); g.stroke(); }
+    };
+
+    // soft makeup: blush, highlights, contour
+    for (const s of [-1, 1]) {
+      blob(s * 0.43, -0.2, 80, 52, "215,105,110", 0.24);
+      blob(s * 0.4, -0.07, 48, 22, "255,214,190", 0.14);
+    }
+    blob(0, -0.665, 46, 12, "110,55,40", 0.22);
+    blob(0, -0.43, 12, 26, "120,60,45", 0.12);
+
+    // nose: gentle shading only, no hard edges
+    for (const s of [-1, 1]) {
+      blob(s * 0.07, -0.1, 14, 62, "125,65,48", 0.16);
+      g.save(); const [nx, ny] = fpx(s * 0.052, -0.288); g.translate(nx, ny); g.rotate(s * 0.35); g.scale(1, 0.5);
+      const ng = g.createRadialGradient(0, 0, 0, 0, 0, 9); ng.addColorStop(0, "rgba(70,30,24,.7)"); ng.addColorStop(1, "rgba(70,30,24,0)"); g.fillStyle = ng; g.beginPath(); g.arc(0, 0, 9, 0, 7); g.fill(); g.restore();
+      g.strokeStyle = "rgba(110,55,40,.25)"; g.lineWidth = 2; trace(spline([[s * 0.075, -0.235], [s * 0.095, -0.262], [s * 0.08, -0.29]], 6)); g.stroke();
+    }
+    blob(0, 0.02, 10, 60, "255,220,195", 0.16);
+    blob(0, -0.215, 20, 16, "255,220,195", 0.3);
+    blob(0, -0.3, 34, 10, "100,48,35", 0.28);
+
+    // brows: soft arch, full at the start, tapering to a fine tail
+    for (const s of [-1, 1]) {
+      const px = spline([[0.16, 0.245], [0.25, 0.292], [0.36, 0.316], [0.47, 0.298], [0.56, 0.245]].map(([x, y]) => [s * x, y]), 12);
+      const top = [], bot = [];
+      px.forEach((p, i) => {
+        const q = px[Math.min(px.length - 1, i + 1)], o = px[Math.max(0, i - 1)], dx = q[0] - o[0], dy = q[1] - o[1], L = Math.hypot(dx, dy) || 1;
+        const t = i / (px.length - 1), w = (t < 0.15 ? 5 + t * 20 : 8 * (1 - (t - 0.15) / 0.85) + 1.2), nx = -dy / L, ny = dx / L;
+        top.push([p[0] + nx * w * s, p[1] + ny * w * s]); bot.push([p[0] - nx * w * s, p[1] - ny * w * s]);
+      });
+      const [ax] = px[0], [bx] = px[px.length - 1], lg = g.createLinearGradient(ax, 0, bx, 0);
+      lg.addColorStop(0, "rgba(45,24,18,.35)"); lg.addColorStop(0.25, "rgba(35,18,14,.82)"); lg.addColorStop(1, "rgba(30,15,12,.85)");
+      g.fillStyle = lg; trace(top.concat(bot.reverse()), true); g.fill();
+      g.strokeStyle = "rgba(20,10,8,.35)"; g.lineWidth = 1.2;
+      for (let i = 2; i < px.length - 2; i += 1) { const [x, y] = px[i]; g.beginPath(); g.moveTo(x - s * 3, y + 4); g.lineTo(x + s * 4, y - 4); g.stroke(); }
+    }
+
+    // eyes
+    for (const s of [-1, 1]) {
+      const mir = (pts) => pts.map(([x, y]) => [s * x, y]);
+      const up = EYE_UP.map((p, i) => [p[0], p[1] + (EYE_SHUT[i][1] - p[1]) * blink]);
+      blob(s * 0.34, 0.165, 92, 46, "125,62,75", 0.32);
+      blob(s * 0.46, 0.14, 46, 28, "85,38,48", 0.28);
+      blob(s * 0.33, 0.215, 60, 16, "255,215,190", 0.14 * (1 - blink));
+      g.strokeStyle = `rgba(95,48,42,${0.38 * (1 - blink * 0.7)})`; g.lineWidth = 2.6;
+      trace(spline(mir([[0.2, 0.135 - 0.05 * blink], [0.3, 0.205 - 0.07 * blink], [0.42, 0.2 - 0.07 * blink], [0.51, 0.13 - 0.02 * blink]]))); g.stroke();
+      const upPx = spline(mir(up)), lowPx = spline(mir(EYE_LOW));
+      if (blink < 0.96) {
+        g.save(); trace(upPx.concat(lowPx.slice().reverse()), true); g.clip();
+        const [ex, ey] = fpx(s * 0.345, 0.085);
+        g.fillStyle = "#dccbbf"; g.fillRect(ex - 120, ey - 80, 240, 160);
+        for (const [cx, a] of [[0.2, 0.55], [0.5, 0.35]]) blob(s * cx, 0.065, 30, 26, "200,125,118", a);
+        const [ix, iy] = fpx(s * 0.335 + gx * 0.04, 0.084 + gy * 0.028), r = 31;
+        const ir = g.createRadialGradient(ix, iy, 0, ix, iy, r);
+        ir.addColorStop(0, "#080403"); ir.addColorStop(0.3, "#080403"); ir.addColorStop(0.36, "#3a1f0d"); ir.addColorStop(0.62, "#6e4220"); ir.addColorStop(0.86, "#2a170a"); ir.addColorStop(1, "#140904");
+        g.fillStyle = ir; g.beginPath(); g.arc(ix, iy, r, 0, 7); g.fill();
+        g.strokeStyle = "rgba(235,185,115,.28)"; g.lineWidth = 1;
+        for (let k = 0; k < 40; k++) { const a = (k / 40) * PI * 2; g.beginPath(); g.moveTo(ix + Math.cos(a) * r * 0.38, iy + Math.sin(a) * r * 0.38); g.lineTo(ix + Math.cos(a) * r * 0.85, iy + Math.sin(a) * r * 0.85); g.stroke(); }
+        g.strokeStyle = "rgba(45,18,12,.55)"; g.lineWidth = 16; trace(upPx); g.stroke();
+        g.strokeStyle = "rgba(45,18,12,.25)"; g.lineWidth = 34; trace(upPx); g.stroke();
+        g.fillStyle = "rgba(255,255,255,.95)"; g.beginPath(); g.arc(ix + r * 0.32, iy - r * 0.3, 5.5, 0, 7); g.fill();
+        g.fillStyle = "rgba(255,255,255,.55)"; g.beginPath(); g.arc(ix - r * 0.3, iy + r * 0.32, 2.4, 0, 7); g.fill();
+        g.restore();
+      }
+      // lash line with a soft winged tip, then lashes
+      taper(upPx, 2.5, 8.5, "#140907", 1.6);
+      const o = fpx(s * 0.505, 0.102 + 0.0 * blink), w1 = fpx(s * 0.555, 0.138 - 0.03 * blink), w2 = fpx(s * 0.6, 0.165 - 0.05 * blink);
+      g.fillStyle = "#140907"; g.beginPath(); g.moveTo(o[0], o[1] - 4); g.quadraticCurveTo(w1[0], w1[1] - 2, w2[0], w2[1]); g.quadraticCurveTo(w1[0], w1[1] + 5, o[0], o[1] + 4); g.closePath(); g.fill();
+      g.strokeStyle = "rgba(20,9,7,.9)"; g.lineWidth = 1.6;
+      const dirY = -1 + 1.75 * blink;
+      for (let i = Math.floor(upPx.length * 0.35); i < upPx.length - 1; i += 2) {
+        const t = i / upPx.length, [x, y] = upPx[i], len = 7 + 9 * t;
+        g.beginPath(); g.moveTo(x, y); g.quadraticCurveTo(x + s * len * 0.2, y + dirY * len * 0.8, x + s * len * 0.7, y + dirY * len); g.stroke();
+      }
+      if (blink < 0.96) {
+        const lp = lowPx.slice(Math.floor(lowPx.length * 0.3));
+        taper(lp, 1.4, 3.2, "rgba(30,14,11,.7)");
+        g.save(); g.filter = "blur(3px)"; taper(lp, 3, 6, "rgba(50,22,26,.22)"); g.restore();
+      }
+    }
+
+    // bindi
+    { const [bx, by] = fpx(0, 0.33); g.fillStyle = "#a3122b"; g.beginPath(); g.arc(bx, by, 7.5, 0, 7); g.fill(); g.fillStyle = "rgba(255,200,200,.6)"; g.beginPath(); g.arc(bx - 2, by - 2.5, 2, 0, 7); g.fill(); }
+
+    // lips: a gentle closed smile that parts when she speaks
+    const bell = (x) => Math.exp(-(x * x) / 0.012);
+    const seamU = LIP_SEAM.map(([x, y]) => [x, y + open * 0.018 * bell(x)]);
+    const seamL = LIP_SEAM.map(([x, y]) => [x, y - open * 0.05 * bell(x)]);
+    const bot = LIP_BOT.map(([x, y]) => [x, y - open * 0.045 * bell(x) * 1.4]);
+    const sU = spline(seamU), sL = spline(seamL), top = spline(LIP_TOP), btm = spline(bot);
+    if (open > 0.03) {
+      g.fillStyle = "#33090f"; trace(sU.concat(sL.slice().reverse()), true); g.fill();
+      g.save(); trace(sU.concat(sL.slice().reverse()), true); g.clip();
+      const [tx, ty] = fpx(0, -0.552); g.fillStyle = "rgba(236,226,214,.9)"; g.beginPath(); g.ellipse(tx, ty + 2, 50, 7 + open * 4, 0, 0, 7); g.fill();
+      g.restore();
+    }
+    const [lx0, ly0] = fpx(0, -0.49), [, ly1] = fpx(0, -0.62);
+    const ug = g.createLinearGradient(0, ly0, 0, ly0 + (ly1 - ly0) * 0.5); ug.addColorStop(0, "#9a3346"); ug.addColorStop(1, "#7c2234");
+    g.fillStyle = ug; trace(top.concat(sU.slice().reverse()), true); g.fill();
+    const lg = g.createLinearGradient(0, ly0 + (ly1 - ly0) * 0.45, 0, ly1 + open * 18); lg.addColorStop(0, "#8e2c40"); lg.addColorStop(0.5, "#ad4357"); lg.addColorStop(1, "#8a2b3e");
+    g.fillStyle = lg; trace(sL.concat(btm.slice().reverse()), true); g.fill();
+    blob(0.035, -0.585 - open * 0.04, 24, 9, "255,200,205", 0.45);
+    blob(-0.04, -0.512, 14, 5, "255,200,205", 0.25);
+    g.strokeStyle = "rgba(60,12,22,.85)"; g.lineWidth = open > 0.03 ? 1.5 : 2.6; trace(sU); g.stroke();
+    for (const s of [-1, 1]) {
+      g.strokeStyle = "rgba(110,50,45,.35)"; g.lineWidth = 2;
+      trace(spline([[s * 0.162, -0.548], [s * 0.18, -0.537], [s * 0.19, -0.522]], 5)); g.stroke();
+    }
+    faceLayerTex.needsUpdate = true;
+  }
+
+  const hairT = canvasTex(1024, 512, (g, w, h) => {
+    const r = seeded(9);
+    g.fillStyle = "#140a08"; g.fillRect(0, 0, w, h);
+    for (let k = 0; k < 2600; k++) {
+      const x = r() * w, wv = r() * 6, light = r() < 0.5;
+      g.strokeStyle = light ? `rgba(70,42,30,${0.25 + r() * 0.3})` : `rgba(6,3,2,${0.4 + r() * 0.4})`; g.lineWidth = 1 + r() * 1.5;
+      g.beginPath(); g.moveTo(x, 0); for (let y = 16; y <= h; y += 16) g.lineTo(x + Math.sin(y * 0.02 + k) * wv, y); g.stroke();
+    }
+    const px = w * 0.25, gr = g.createLinearGradient(px - 6, 0, px + 6, 0); gr.addColorStop(0, "rgba(0,0,0,0)"); gr.addColorStop(0.5, "rgba(150,90,65,.7)"); gr.addColorStop(1, "rgba(0,0,0,0)");
+    g.fillStyle = gr; g.fillRect(px - 6, 0, 12, h * 0.3);
+  });
+  const hairAlpha = canvasTex(1024, 512, (g, w, h) => {
+    const r = seeded(13); g.fillStyle = "#fff"; g.fillRect(0, 0, w, h);
+    for (let x = 0; x < w; x += 2) { const end = h * (0.5 + r() * 0.04); const gr = g.createLinearGradient(0, end - 30, 0, end); gr.addColorStop(0, "#fff"); gr.addColorStop(1, "#000"); g.fillStyle = gr; g.fillRect(x, end - 30, 2, 30); g.fillStyle = "#000"; g.fillRect(x, end, 2, h - end); }
+  });
+  hairAlpha.colorSpace = THREE.NoColorSpace;
+  M.hair = new THREE.MeshPhysicalMaterial({ map: hairT, alphaMap: hairAlpha, alphaTest: 0.5, roughness: 0.42, sheen: 0.8, sheenColor: C(0x6b4a3a), sheenRoughness: 0.3, side: THREE.DoubleSide });
+  M.strand = new THREE.MeshPhysicalMaterial({ color: C(0x170c09), roughness: 0.4, sheen: 0.9, sheenColor: C(0x7a5442), sheenRoughness: 0.3 });
+
+  const robeT = texturePair(1024, 1024, (g, pass, w, h) => {
+    const r = seeded(3), gold = goldFill(g, pass, 0, 0, w, 0);
+    if (pass === "color") {
+      g.fillStyle = "#5a1428"; g.fillRect(0, 0, w, h);
+      for (let x = 0; x < w; x++) { const v = 0.5 + 0.5 * Math.sin((x / w) * PI * 2 * 14 + Math.sin(x * 0.05)); g.fillStyle = `rgba(0,0,0,${v * 0.3})`; g.fillRect(x, 0, 1, h); }
+    } else { g.fillStyle = "rgb(0,215,0)"; g.fillRect(0, 0, w, h); }
+    const y0 = h * 0.3, y1 = h * 0.42, ym = (y0 + y1) / 2;
+    g.fillStyle = gold; g.fillRect(0, y0, w, 6); g.fillRect(0, y1, w, 6); g.fillRect(0, h * 0.93, w, 8);
+    g.strokeStyle = gold; g.lineWidth = 2;
+    for (let x = 0; x < w; x += 40) {
+      g.fillStyle = gold; g.beginPath(); g.arc(x + 20, ym, 7, 0, 7); g.fill();
+      g.beginPath(); g.moveTo(x, ym); g.lineTo(x + 20, y0 + 12); g.lineTo(x + 40, ym); g.lineTo(x + 20, y1 - 6); g.closePath(); g.stroke();
+    }
+    for (let k = 0; k < 450; k++) { g.fillStyle = gold; g.beginPath(); g.arc(r() * w, h * 0.46 + r() * h * 0.45, 1.6, 0, 7); g.fill(); }
+  });
+  M.robe = new THREE.MeshPhysicalMaterial({ map: robeT.map, roughnessMap: robeT.orm, metalnessMap: robeT.orm, roughness: 1, metalness: 1, sheen: 0.8, sheenColor: C(0xb03a5c), sheenRoughness: 0.35, side: THREE.DoubleSide });
+
+  const PROFILE = [[0, 0.5], [0.33, 0.5], [0.34, 0.9], [0.31, 1.2], [0.3, 1.38], [0.26, 1.5], [0.17, 1.58], [0.075, 1.64], [0, 1.65]];
+  const torsoR = (y) => { for (let i = 1; i < PROFILE.length; i++) { const [r0, y0] = PROFILE[i - 1], [r1, y1] = PROFILE[i]; if (y <= y1) return r0 + ((r1 - r0) * (y - y0)) / (y1 - y0 || 1); } return 0; };
+  const onChest = (x, y, lift = 0.008) => V(x, y, -0.98 + 0.62 * Math.sqrt(Math.max(0, torsoR(y) ** 2 - x * x)) + lift);
+
+  function makeHand(s) {
+    const hand = new THREE.Group();
+    mesh(new THREE.SphereGeometry(1, 24, 16), M.skinPlain, hand, V(0, 0, 0.004), V(0.034, 0.012, 0.042));
+    const finger = (x, len, curl) => {
+      let parent = new THREE.Group(), first = null; parent.position.set(x, -0.002, 0.036); hand.add(parent);
+      len.forEach((L, j) => {
+        const seg = new THREE.Group(); seg.rotation.x = curl; parent.add(seg); first ||= seg;
+        const rad = 0.0058 - j * 0.0008;
+        mesh(new THREE.CapsuleGeometry(rad, L, 4, 10), M.skinPlain, seg, V(0, 0, L / 2), null, new THREE.Euler(PI / 2, 0, 0));
+        const next = new THREE.Group(); next.position.z = L; seg.add(next); parent = next;
+      });
+      return first;
+    };
+    [[-0.019, 0.9], [-0.0065, 1], [0.0065, 0.97], [0.019, 0.8]].forEach(([fx, k], i) => {
+      const base = finger(s * fx, [0.021 * k, 0.015 * k, 0.012 * k], 0.22 + i * 0.03);
+      if (i === 2) mesh(new THREE.TorusGeometry(0.0062, 0.0013, 6, 16), M.gold, base, V(0, 0, 0.008));
+    });
+    const th = new THREE.Group(); th.position.set(s * 0.03, -0.004, 0.008); th.rotation.set(0.25, s * 0.75, 0); hand.add(th);
+    mesh(new THREE.CapsuleGeometry(0.0064, 0.02, 4, 10), M.skinPlain, th, V(0, 0, 0.012), null, new THREE.Euler(PI / 2, 0, 0));
+    return hand;
+  }
+
   (function buildMira() {
     const root = new THREE.Group(); scene.add(root);
     const lathe = (pts, seg, ps, pl) => new THREE.LatheGeometry(pts.map((p) => new THREE.Vector2(p[0], p[1])), seg, ps, pl);
-    mira.torso = mesh(lathe([[0, 0.5], [0.33, 0.5], [0.34, 0.9], [0.31, 1.2], [0.3, 1.38], [0.26, 1.5], [0.17, 1.58], [0.075, 1.64], [0, 1.65]], 48), M.robe, root, V(0, 0, -0.98), V(1, 1, 0.62));
-    mesh(new THREE.SphereGeometry(0.1, 24, 16), M.skin, root, V(0, 1.57, -0.93), V(1, 0.6, 0.4));
-    mesh(lathe([[0.17, 1.74], [0.28, 1.62], [0.38, 1.42], [0.42, 1.1], [0.46, 0.6]], 48, 0.6, PI * 2 - 1.2), M.cloak, root, V(0, 0, -0.99), V(1, 1, 0.78));
-    mesh(new THREE.TorusGeometry(0.105, 0.009, 8, 40, PI), M.gold, root, V(0, 1.585, -0.93), V(1, 1.1, 1), new THREE.Euler(PI * 0.62, 0, PI));
-    mesh(new THREE.OctahedronGeometry(0.018), M.gem, root, V(0, 1.48, -0.86), V(1, 1.4, 0.6));
-    mesh(new THREE.TorusGeometry(0.13, 0.006, 8, 40, PI), M.gold, root, V(0, 1.56, -0.92), V(1, 1.3, 1), new THREE.Euler(PI * 0.62, 0, PI));
-    mesh(new THREE.CylinderGeometry(0.05, 0.058, 0.18, 24), M.skinDark, root, V(0, 1.7, -0.96));
-    const head = new THREE.Group(); head.position.set(0, 1.86, -0.95); root.add(head); mira.head = head;
-    mesh(new THREE.SphereGeometry(0.16, 48, 32), M.skin, head, null, V(0.88, 1.08, 0.95));
-    mesh(new THREE.SphereGeometry(0.1, 32, 24), M.skin, head, V(0, -0.09, 0.05), V(0.9, 0.8, 0.9));
-    mira.eyes = [];
-    for (const s of [-1, 1]) {
-      const eg = new THREE.Group(); eg.position.set(s * 0.056, 0.02, 0.128); head.add(eg); mira.eyes.push(eg);
-      mesh(new THREE.SphereGeometry(0.03, 24, 16), M.white, eg, null, V(1, 0.62, 0.6));
-      const ir = new THREE.Group(); eg.add(ir); eg.userData.iris = ir;
-      mesh(new THREE.SphereGeometry(0.017, 20, 14), M.iris, ir, V(0, 0, 0.012), V(1, 1, 0.7));
-      mesh(new THREE.SphereGeometry(0.008, 12, 10), M.black, ir, V(0, 0, 0.021));
-      mesh(new THREE.SphereGeometry(0.0038, 8, 6), M.spark, ir, V(0.006, 0.006, 0.027));
-      mesh(new THREE.TorusGeometry(0.031, 0.0045, 6, 20, PI), M.black, eg, V(0, 0.001, 0.006), V(1, 0.64, 1));
-      mesh(new THREE.ConeGeometry(0.004, 0.022, 6), M.black, eg, V(s * 0.034, 0.008, 0.004), null, new THREE.Euler(0, 0, -s * 1.1));
-      mesh(new THREE.BoxGeometry(0.052, 0.006, 0.012), M.hair, head, V(s * 0.058, 0.064, 0.13), null, new THREE.Euler(0, 0, -s * 0.14));
+    mira.torso = mesh(lathe(PROFILE, 64), M.robe, root, V(0, 0, -0.98), V(1, 1, 0.62));
+    mesh(new THREE.SphereGeometry(0.1, 32, 20), M.skinPlain, root, V(0, 1.57, -0.925), V(1, 0.6, 0.4));
+    mesh(lathe([[0.17, 1.74], [0.28, 1.62], [0.38, 1.42], [0.42, 1.1], [0.46, 0.6]], 64, 0.6, PI * 2 - 1.2), M.cloak, root, V(0, 0, -0.99), V(1, 1, 0.78));
+    mesh(new THREE.CylinderGeometry(0.041, 0.055, 0.2, 32), M.skinPlain, root, V(0, 1.7, -0.96));
+    // necklace: gold beads, a pearl strand and a ruby pendant
+    for (let i = 0; i <= 26; i++) { const a = -1 + (2 * i) / 26, y = 1.585 - 0.07 * Math.cos(a * PI / 2); mesh(new THREE.SphereGeometry(0.0055, 10, 8), M.gold, root, onChest(a * 0.105, y)); }
+    for (let i = 0; i <= 30; i++) { const a = -1 + (2 * i) / 30, y = 1.575 - 0.115 * Math.cos(a * PI / 2); mesh(new THREE.SphereGeometry(0.0045, 10, 8), M.pearl, root, onChest(a * 0.13, y)); }
+    const pend = onChest(0, 1.47, 0.012);
+    mesh(new THREE.CylinderGeometry(0.016, 0.016, 0.004, 24), M.gold, root, pend, null, new THREE.Euler(PI / 2 - 0.25, 0, 0));
+    mesh(new THREE.OctahedronGeometry(0.011), M.gem, root, pend.clone().add(V(0, 0, 0.004)), V(1, 1.3, 0.6));
+
+    const head = new THREE.Group(); head.position.set(0, 1.83, -0.95); root.add(head); mira.head = head;
+    const hg = new THREE.SphereGeometry(1, 128, 96), hp = hg.attributes.position;
+    for (let i = 0; i < hp.count; i++) { const s = sculpt(V(hp.getX(i), hp.getY(i), hp.getZ(i))); hp.setXYZ(i, s.x, s.y, s.z); }
+    hg.computeVertexNormals();
+    mesh(hg, M.skin, head);
+    for (const s of [-1, 1]) mesh(new THREE.SphereGeometry(1, 16, 12), M.skinPlain, head, V(s * 0.113, -0.012, -0.012), V(0.012, 0.026, 0.017));
+    const fl = new THREE.SphereGeometry(1, 96, 96, PH0, PHL, TH0, THL), flp = fl.attributes.position;
+    for (let i = 0; i < flp.count; i++) { const s = sculpt(V(flp.getX(i), flp.getY(i), flp.getZ(i))); flp.setXYZ(i, s.x, s.y, s.z); }
+    fl.computeVertexNormals();
+    const faceMesh = mesh(fl, M.faceLayer, head); faceMesh.castShadow = false;
+    drawFace(0, 0, 0, 0);
+
+    // hair: textured cap with a centre parting, and loose strands framing the face
+    mesh(new THREE.SphereGeometry(1, 64, 40, 0, PI * 2, 0, PI * 0.62), M.hair, head, V(0, 0.006, -0.006), V(0.127, 0.168, 0.148), new THREE.Euler(-0.22, 0, 0));
+    // Strands lie along the scalp from the parting, then fall past the jaw to the shoulders.
+    const strands = [], hr = seeded(21);
+    const onHead = (az, el, lift) => sculpt(V(Math.sin(az) * Math.cos(el), Math.sin(el), Math.cos(az) * Math.cos(el))).multiplyScalar(lift);
+    for (const s of [-1, 1]) for (let k = 0; k < 230; k++) {
+      const q = hr(), az0 = s * (0.03 + hr() * 0.45), az1 = s * (1.0 + hr() * 1.0), lift = 1.045 + hr() * 0.02, front = Math.abs(az1) < 1.3;
+      const pts = [[0.97, 0], [0.8, 0.45], [0.6, 0.8], [0.38, 1], [0.12, 1]].map(([el, f]) => onHead(az0 + (az1 - az0) * f, el, lift));
+      const last = pts[pts.length - 1];
+      pts.push(V(last.x * 1.04, -0.1 - q * 0.03, last.z * 0.9));
+      pts.push(V(s * (0.108 + q * 0.04), -0.26 - q * 0.1, front ? 0.03 + q * 0.03 : -0.02 - q * 0.05));
+      strands.push(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 28, 0.0017 + hr() * 0.0012, 4, false));
     }
-    mesh(new THREE.ConeGeometry(0.018, 0.05, 16), M.skin, head, V(0, -0.028, 0.152), V(1, 1, 0.7), new THREE.Euler(1.3, 0, 0));
-    mesh(new THREE.SphereGeometry(0.0035, 8, 6), M.gold, head, V(0.013, -0.045, 0.162));
-    const mouth = new THREE.Group(); mouth.position.set(0, -0.087, 0.135); head.add(mouth); mira.mouth = mouth;
-    mesh(new THREE.SphereGeometry(0.026, 20, 12), M.lips, mouth, V(0, 0.006, 0), V(1, 0.28, 0.45));
-    mesh(new THREE.SphereGeometry(0.026, 20, 12), M.lips, mouth, V(0, -0.006, 0), V(0.9, 0.34, 0.5));
-    mesh(new THREE.SphereGeometry(0.007, 10, 8), M.gem, head, V(0, 0.1, 0.129));
-    mesh(new THREE.SphereGeometry(0.172, 48, 32, 0, PI * 2, 0, PI * 0.5), M.hair, head, V(0, 0.005, -0.005), V(0.92, 1.1, 0.98), new THREE.Euler(-0.38, 0, 0));
-    mesh(new THREE.CylinderGeometry(0.165, 0.27, 0.6, 40, 1, true, PI * 0.38, PI * 1.24), M.hair, head, V(0, -0.24, -0.03));
-    mesh(new THREE.CylinderGeometry(0.004, 0.004, 0.1, 6), M.gold, head, V(0, 0.155, 0.09), null, new THREE.Euler(-0.9, 0, 0));
+    mesh(mergeGeometries(strands), M.strand, head);
+    // the long hair behind her head and shoulders, so the strands sit on a full, dark mass
+    mesh(new THREE.SphereGeometry(1, 40, 28), M.strand, head, V(0, -0.075, -0.045), V(0.122, 0.21, 0.085));
+
+    // jewellery: maang tikka, nose ring with chain, jhumka earrings
+    const tik = fp(0, 0.62); tik.z += 0.003;
+    mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3([V(0, 0.16, 0.03), V(0, 0.13, 0.085), tik.clone().add(V(0, 0.012, 0))]), 20, 0.0009, 5), M.gold, head);
+    mesh(new THREE.CylinderGeometry(0.0055, 0.0055, 0.0015, 20), M.gold, head, tik, null, new THREE.Euler(PI / 2 - 0.2, 0, 0));
+    mesh(new THREE.SphereGeometry(0.003, 12, 10), M.gem, head, tik.clone().add(V(0, 0, 0.0015)));
+    mesh(new THREE.SphereGeometry(0.0028, 10, 8), M.pearl, head, tik.clone().add(V(0, -0.011, 0)));
+    const nose = fp(-0.085, -0.27); nose.add(V(-0.002, -0.002, 0.001));
+    mesh(new THREE.TorusGeometry(0.0068, 0.0009, 8, 28), M.gold, head, nose.clone().add(V(0, -0.005, 0)), null, new THREE.Euler(0, PI / 2 - 0.3, 0));
+    mesh(new THREE.SphereGeometry(0.002, 8, 6), M.pearl, head, nose.clone().add(V(0, -0.0118, 0)));
     mira.ears = [];
     for (const s of [-1, 1]) {
-      const g = new THREE.Group(); g.position.set(s * 0.138, -0.03, 0); head.add(g); mira.ears.push(g);
-      mesh(new THREE.CylinderGeometry(0.002, 0.002, 0.03, 6), M.gold, g, V(0, -0.015, 0));
-      mesh(new THREE.ConeGeometry(0.02, 0.03, 16, 1, true), M.gold, g, V(0, -0.04, 0));
-      mesh(new THREE.SphereGeometry(0.006, 8, 6), M.gem, g, V(0, -0.058, 0));
+      const g = new THREE.Group(); g.position.set(s * 0.118, -0.04, -0.008); head.add(g); mira.ears.push(g);
+      mesh(new THREE.SphereGeometry(0.004, 10, 8), M.gold, g);
+      mesh(new THREE.CylinderGeometry(0.0008, 0.0008, 0.014, 4), M.gold, g, V(0, -0.009, 0));
+      const bell = lathe([[0.001, 0], [0.006, -0.004], [0.011, -0.012], [0.015, -0.024], [0.016, -0.026]], 24);
+      mesh(bell, M.gold, g, V(0, -0.014, 0));
+      for (let k = 0; k < 8; k++) { const a = (k / 8) * PI * 2; mesh(new THREE.SphereGeometry(0.0022, 8, 6), M.pearl, g, V(Math.cos(a) * 0.015, -0.044, Math.sin(a) * 0.015)); }
     }
+
+    // hood with a gold-embroidered edge
     const a = 0.85, ps = PI / 2 + a, pl = PI * 2 - 2 * a, T = PI * 0.62, R = 0.235, hs = V(1, 1.12, 1.05), ho = V(0, 0.03, -0.03);
-    mesh(new THREE.SphereGeometry(R, 48, 32, ps, pl, 0, T), M.robe, head, ho, hs);
+    mesh(new THREE.SphereGeometry(R, 64, 40, ps, pl, 0, T), M.velvet, head, ho, hs);
     const edge = (phi, th) => V(-R * Math.cos(phi) * Math.sin(th) * hs.x + ho.x, R * Math.cos(th) * hs.y + ho.y, R * Math.sin(phi) * Math.sin(th) * hs.z + ho.z);
     const pts = []; for (let i = 20; i >= 0; i--) pts.push(edge(ps, (T * i) / 20)); for (let i = 1; i <= 20; i++) pts.push(edge(ps + pl, (T * i) / 20));
-    mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 80, 0.007, 6, false), M.gold, head);
+    const hoodCurve = new THREE.CatmullRomCurve3(pts);
+    mesh(new THREE.TubeGeometry(hoodCurve, 120, 0.006, 8, false), M.gold, head);
+    for (let i = 1; i < 40; i++) mesh(new THREE.SphereGeometry(0.0035, 8, 6), i % 4 ? M.gold : M.gem, head, hoodCurve.getPoint(i / 40).multiplyScalar(0.985));
+
+    // arms: sleeves with flared, gold-trimmed cuffs, hands with fingers, stacked bangles
     mira.arms = [-1, 1].map((s) => {
       const S = V(s * 0.28, 1.46, -0.92);
-      mesh(new THREE.SphereGeometry(0.075, 20, 14), M.robe, root, S);
+      mesh(new THREE.SphereGeometry(0.075, 24, 16), M.robe, root, S);
       const tube = mesh(new THREE.BufferGeometry(), M.robe, root);
-      const hand = new THREE.Group(); root.add(hand);
-      mesh(new THREE.SphereGeometry(0.045, 20, 14), M.skin, hand, null, V(0.85, 0.45, 1.25));
-      mesh(new THREE.SphereGeometry(0.03, 14, 10), M.skin, hand, V(-s * 0.03, 0, -0.01), V(0.5, 0.4, 0.8));
-      const cuff = mesh(new THREE.TorusGeometry(0.05, 0.008, 8, 24), M.gold, root);
+      const flare = mesh(new THREE.CylinderGeometry(0.05, 0.068, 0.06, 28, 1, true), M.velvet, root);
+      const trim = mesh(new THREE.TorusGeometry(0.067, 0.004, 8, 32), M.gold, root);
+      const hand = makeHand(s); root.add(hand);
+      const bangles = [0, 1, 2].map(() => mesh(new THREE.TorusGeometry(0.031, 0.0028, 8, 28), M.gold, root));
       const rest = V(s * 0.19, 1.06, -0.43);
-      return { s, S, tube, hand, cuff, cur: rest.clone(), target: rest.clone(), rest };
+      return { s, S, tube, flare, trim, hand, bangles, cur: rest.clone(), target: rest.clone(), rest };
     });
   })();
+  const Z = V(0, 0, 1), Y = V(0, 1, 0);
   function updateArm(arm) {
     const H = arm.cur, S = arm.S;
     const E = S.clone().lerp(H, 0.5).add(V(arm.s * 0.14, -0.11, -0.03));
+    const dir = H.clone().sub(E).normalize(), wrist = H.clone().addScaledVector(dir, -0.055);
     arm.tube.geometry.dispose();
-    arm.tube.geometry = new THREE.TubeGeometry(new THREE.CatmullRomCurve3([S, E, H.clone().add(V(0, 0.01, 0))]), 18, 0.052, 10, false);
-    const dir = H.clone().sub(E).normalize();
-    arm.hand.position.copy(H).addScaledVector(dir, 0.03); arm.hand.quaternion.setFromUnitVectors(V(0, 0, 1), dir);
-    arm.cuff.position.copy(H).addScaledVector(dir, -0.01); arm.cuff.quaternion.setFromUnitVectors(V(0, 0, 1), dir);
+    arm.tube.geometry = new THREE.TubeGeometry(new THREE.CatmullRomCurve3([S, E, wrist]), 18, 0.05, 12, false);
+    arm.flare.position.copy(wrist).addScaledVector(dir, 0.02); arm.flare.quaternion.setFromUnitVectors(Y, dir);
+    arm.trim.position.copy(wrist).addScaledVector(dir, 0.05); arm.trim.quaternion.setFromUnitVectors(Z, dir);
+    arm.hand.position.copy(H).addScaledVector(dir, 0.012); arm.hand.quaternion.setFromUnitVectors(Z, dir);
+    arm.bangles.forEach((b, i) => { b.position.copy(H).addScaledVector(dir, -0.012 - i * 0.006); b.quaternion.setFromUnitVectors(Z, dir); });
   }
 
   /* ---------- room ---------- */
   const candles = [], smoke = []; let orb, revealGlow, dust, sparks, smokeTip, gust = 0, breath = 0;
   (function buildRoom() {
+    // Soft dark patches where objects touch the cloth, so nothing looks like it floats.
+    const shadowTex = glowTex([[0, "rgba(0,0,0,.8)"], [0.55, "rgba(0,0,0,.3)"], [1, "rgba(0,0,0,0)"]]);
+    const contact = (x, z, w, d, rz = 0, op = 0.8) => { const m = new THREE.Mesh(new THREE.PlaneGeometry(w, d), new THREE.MeshBasicMaterial({ map: shadowTex, transparent: true, depthWrite: false, opacity: op, polygonOffset: true, polygonOffsetFactor: -2 })); m.rotation.set(-PI / 2, 0, rz); m.position.set(x, 0.9515, z); scene.add(m); return m; };
+    contact(0, -0.42, 0.42, 0.42, 0, 0.85); contact(-0.42, -0.66, 0.14, 0.14, 0, 0.6); contact(0.62, -0.3, 0.38, 0.54, -0.32, 0.7); contact(0, -0.74, 0.95, 0.38, 0, 0.9);
     const cloth = canvasTex(1024, 1024, (g, w) => {
       const r = g.createRadialGradient(512, 512, 40, 512, 512, 520); r.addColorStop(0, "#4f1527"); r.addColorStop(1, "#1d0910"); g.fillStyle = r; g.fillRect(0, 0, w, w);
       for (let i = 0; i < 9000; i++) { g.fillStyle = `rgba(255,220,200,${Math.random() * 0.025})`; g.fillRect(Math.random() * w, Math.random() * w, 2, 2); }
@@ -176,7 +495,9 @@ export function createScene(canvas, hooks) {
     [[-0.92, 0.15, 0.2], [-0.68, -0.78, 0.32], [0.95, 0.0, 0.26], [0.72, -0.88, 0.36], [-1.0, -0.35, 0.14]].forEach(([x, z, h], i) => {
       const g = new THREE.Group(); g.position.set(x, 0.95, z); scene.add(g);
       mesh(new THREE.CylinderGeometry(0.07, 0.08, 0.02, 24), M.gold, g, V(0, 0.01, 0));
-      mesh(new THREE.CylinderGeometry(0.032, 0.036, h, 24), M.wax, g, V(0, 0.02 + h / 2, 0));
+      mesh(new THREE.LatheGeometry([[0, 0], [0.036, 0], [0.035, h * 0.4], [0.033, h * 0.85], [0.034, h - 0.004], [0.029, h], [0.012, h - 0.006], [0, h - 0.006]].map(([a, b]) => new THREE.Vector2(a, b)), 32), M.wax, g, V(0, 0.02, 0));
+      for (let k = 0; k < 3; k++) { const a = Math.random() * PI * 2, L = 0.02 + Math.random() * h * 0.4; mesh(new THREE.CapsuleGeometry(0.005, L, 4, 8), M.wax, g, V(Math.cos(a) * 0.034, 0.02 + h - L / 2 - 0.006, Math.sin(a) * 0.034)); }
+      contact(x, z, 0.24, 0.24, 0, 0.7);
       const fl = new THREE.Sprite(additive(flameT)); fl.position.y = 0.02 + h + 0.035; fl.scale.set(0.04, 0.08, 1); g.add(fl);
       const gl = new THREE.Sprite(additive(glowT, { opacity: 0.9 })); gl.position.y = fl.position.y; gl.scale.setScalar(0.6); g.add(gl);
       let light = null; if (i < 3) { light = new THREE.PointLight(C(0xffa055), 1.0, 4, 2); light.position.y = fl.position.y + 0.12; g.add(light); }
@@ -228,9 +549,10 @@ export function createScene(canvas, hooks) {
     scene.add(new THREE.HemisphereLight(C(0x4a2a3a), C(0x070304), 1.4));
     const spot = new THREE.SpotLight(C(0xffd9a8), 70, 12, 0.5, 0.75, 2);
     spot.position.set(0.5, 4.4, 1.8); spot.target.position.set(0, 1, -0.3); scene.add(spot); scene.add(spot.target);
-    spot.castShadow = true; spot.shadow.mapSize.set(1024, 1024); spot.shadow.bias = -0.0004; spot.shadow.camera.near = 1; spot.shadow.camera.far = 8;
+    spot.castShadow = true; spot.shadow.mapSize.set(2048, 2048); spot.shadow.bias = -0.0004; spot.shadow.camera.near = 1; spot.shadow.camera.far = 8;
     const rim = new THREE.PointLight(C(0xd0506e), 5, 4, 2); rim.position.set(0, 2.4, -2.1); scene.add(rim);
-    const face = new THREE.PointLight(C(0xffc89a), 1.6, 3, 2); face.position.set(0, 1.95, 0.4); scene.add(face);
+    const face = new THREE.PointLight(C(0xffc89a), 1.5, 3, 2); face.position.set(0.55, 2.05, 0.15); scene.add(face);
+    const fill = new THREE.PointLight(C(0x9a7cff), 0.35, 3, 2); fill.position.set(-0.6, 1.8, 0.2); scene.add(fill);
   })();
   function burst(p) {
     const a = sparks.geometry.attributes.position;
@@ -242,42 +564,122 @@ export function createScene(canvas, hooks) {
   const CW = 0.26, CH = 0.44, CT = 0.004, deckMeshes = [], dealt = [];
   const slots = [{ p: V(-0.42, 0.958, 0.32), ry: 0.16 }, { p: V(0, 0.958, 0.4), ry: 0 }, { p: V(0.42, 0.958, 0.32), ry: -0.16 }];
   let hovered = -1, holdIdx = -1, holdT = 0, deckTop;
-  function faceTexture(c, reversed) {
-    const tx = canvasTex(512, 868, (g, w, h) => {
-      const gr = g.createLinearGradient(0, 0, 0, h); gr.addColorStop(0, "#f6ecd6"); gr.addColorStop(1, "#dcc59c"); g.fillStyle = gr; g.fillRect(0, 0, w, h);
-      const r = g.createRadialGradient(w / 2, h / 2, 120, w / 2, h / 2, 540); r.addColorStop(0, "rgba(255,255,255,0)"); r.addColorStop(1, "rgba(106,29,51,.28)"); g.fillStyle = r; g.fillRect(0, 0, w, h);
-      g.strokeStyle = "#6a1d33"; g.lineWidth = 7; g.strokeRect(16, 16, w - 32, h - 32); g.strokeStyle = "#b08440"; g.lineWidth = 2; g.strokeRect(32, 32, w - 64, h - 64);
-      g.save(); g.translate(w / 2, 428); g.strokeStyle = "rgba(176,132,64,.4)"; g.lineWidth = 2;
-      for (let i = 0; i < 48; i++) { g.rotate(PI / 24); g.beginPath(); g.moveTo(0, 168); g.lineTo(0, i % 2 ? 205 : 228); g.stroke(); }
-      g.beginPath(); g.arc(0, 0, 166, 0, PI * 2); g.stroke(); g.restore();
-      g.fillStyle = "#4a1424"; g.textAlign = "center";
-      g.font = '64px "Marcellus SC", Georgia, serif'; g.fillText(c.num, w / 2, 122);
-      let fs = 48; const nm = c.name.toUpperCase(); do { g.font = `${fs}px "Marcellus SC", Georgia, serif`; fs -= 2; } while (g.measureText(nm).width > 420 && fs > 20);
-      g.fillText(nm, w / 2, 742);
-      g.font = 'italic 26px "EB Garamond", Georgia, serif'; g.fillStyle = "#6a1d33"; g.fillText(c.kw, w / 2, 796);
+  const TW = 512, TH = 868;
+
+  // Each card side is drawn three times: colour, gloss (gold foil is metal, paper is matte), and relief.
+  function cardMaterial(draw, emblems = []) {
+    const mk = () => { const c = document.createElement("canvas"); c.width = TW; c.height = TH; return c; };
+    const canv = { color: mk(), orm: mk(), bump: mk() };
+    for (const pass of ["color", "orm", "bump"]) draw(canv[pass].getContext("2d"), pass);
+    const map = new THREE.CanvasTexture(canv.color); map.colorSpace = THREE.SRGBColorSpace; map.anisotropy = 8;
+    const orm = new THREE.CanvasTexture(canv.orm), bump = new THREE.CanvasTexture(canv.bump);
+    const tex = { color: map, orm, bump };
+    const ink = { color: "#ecc77a", orm: "rgb(0,70,255)", bump: "#ffffff" };
+    for (const e of emblems) for (const pass of ["color", "orm", "bump"]) {
+      svgImg(emblemSVG(e.t, e.ink?.[pass] || ink[pass]), (img) => { canv[pass].getContext("2d").drawImage(img, e.x, e.y, e.s, e.s); tex[pass].needsUpdate = true; });
+    }
+    return new THREE.MeshPhysicalMaterial({
+      map, roughnessMap: orm, metalnessMap: orm, roughness: 1, metalness: 1, bumpMap: bump, bumpScale: 1.2,
+      clearcoat: 0.2, clearcoatRoughness: 0.5, emissive: C(0xffffff), emissiveMap: map, emissiveIntensity: 0,
     });
-    svgImg(emblemSVG(c.emb, "#6a1d33"), (img) => { tx.image.getContext("2d").drawImage(img, 106, 278, 300, 300); tx.needsUpdate = true; });
-    tx.anisotropy = 8; if (reversed) { tx.center.set(0.5, 0.5); tx.rotation = PI; }
-    return tx;
   }
-  const backTex = canvasTex(512, 868, (g, w, h) => {
-    g.fillStyle = "#5d1830"; g.fillRect(0, 0, w, h);
-    const r = g.createRadialGradient(w / 2, h / 2, 40, w / 2, h / 2, 480); r.addColorStop(0, "rgba(207,164,92,.28)"); r.addColorStop(1, "rgba(0,0,0,.35)"); g.fillStyle = r; g.fillRect(0, 0, w, h);
-    g.strokeStyle = "rgba(207,164,92,.22)"; g.lineWidth = 2;
-    for (let i = -h; i < w + h; i += 34) { g.beginPath(); g.moveTo(i, 0); g.lineTo(i + h, h); g.stroke(); g.beginPath(); g.moveTo(i, h); g.lineTo(i + h, 0); g.stroke(); }
-    g.strokeStyle = "#cfa45c"; g.lineWidth = 6; g.strokeRect(16, 16, w - 32, h - 32); g.lineWidth = 2; g.strokeRect(30, 30, w - 60, h - 60);
+  // Pass-aware paint: gold foil, plain ink, or paper.
+  const P = (g, pass) => ({
+    gold: () => goldFill(g, pass, 0, 0, TW, TH),
+    ink: (c) => (pass === "color" ? c : pass === "orm" ? "rgb(0,200,0)" : "#262626"),
+    paper: (c) => (pass === "color" ? c : pass === "orm" ? "rgb(0,205,0)" : "#000000"),
   });
-  svgImg(emblemSVG("back", "#e0b86c"), (img) => { backTex.image.getContext("2d").drawImage(img, 106, 284, 300, 300); backTex.needsUpdate = true; });
-  backTex.anisotropy = 8;
-  const backMat = new THREE.MeshStandardMaterial({ map: backTex, roughness: 0.5, metalness: 0.1 });
-  const edgeMat = new THREE.MeshStandardMaterial({ color: C(0xd9ae62), metalness: 0.8, roughness: 0.3, emissive: C(0x2a1a06) });
-  function makeCard(front) { const m = new THREE.Mesh(new THREE.BoxGeometry(CW, CH, CT), [edgeMat, edgeMat, edgeMat, edgeMat, front || backMat, backMat]); m.castShadow = true; m.receiveShadow = true; m.rotation.order = "YXZ"; return m; }
+  function roundRect(g, x, y, w, h, r) { g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r); g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath(); }
+  function grain(g, pass, seed, alpha) {
+    const r = seeded(seed);
+    for (let i = 0; i < 9000; i++) {
+      const v = r();
+      g.fillStyle = pass === "color" ? `rgba(${v < 0.5 ? "90,60,30" : "255,250,235"},${alpha * r()})` : pass === "orm" ? `rgba(0,${180 + Math.floor(r() * 60)},0,0.25)` : `rgba(255,255,255,${0.05 * r()})`;
+      g.fillRect(r() * TW, r() * TH, 1 + r() * 2, 1 + r() * 2);
+    }
+  }
+  function faceMaterial(c, reversed) {
+    const hue = (c.index * 47) % 360;
+    const mat = cardMaterial((g, pass) => {
+      const p = P(g, pass);
+      g.fillStyle = p.paper("#efe2c4"); g.fillRect(0, 0, TW, TH);
+      if (pass === "color") { const v = g.createRadialGradient(TW / 2, TH / 2, 200, TW / 2, TH / 2, 560); v.addColorStop(0, "rgba(0,0,0,0)"); v.addColorStop(1, "rgba(110,70,30,.35)"); g.fillStyle = v; g.fillRect(0, 0, TW, TH); }
+      // arched picture window with a painted sky
+      g.save(); g.beginPath(); g.moveTo(66, 690); g.lineTo(66, 300); g.arc(TW / 2, 300, TW / 2 - 66, PI, 0); g.lineTo(TW - 66, 690); g.closePath(); g.clip();
+      if (pass === "color") {
+        const sky = g.createLinearGradient(0, 110, 0, 690); sky.addColorStop(0, `hsl(${hue},38%,16%)`); sky.addColorStop(0.65, `hsl(${(hue + 25) % 360},42%,34%)`); sky.addColorStop(1, `hsl(${(hue + 40) % 360},48%,52%)`);
+        g.fillStyle = sky; g.fillRect(0, 0, TW, TH);
+        const r = seeded(c.index + 1); for (let i = 0; i < 70; i++) { g.fillStyle = `rgba(255,245,220,${0.3 + r() * 0.6})`; g.beginPath(); g.arc(70 + r() * (TW - 140), 120 + r() * 330, r() * 1.8 + 0.4, 0, 7); g.fill(); }
+        g.save(); g.translate(TW / 2, 430); g.strokeStyle = "rgba(255,225,160,.18)"; g.lineWidth = 2; for (let i = 0; i < 36; i++) { g.rotate(PI / 18); g.beginPath(); g.moveTo(0, 150); g.lineTo(0, 320); g.stroke(); } g.restore();
+        g.fillStyle = `hsl(${(hue + 30) % 360},35%,14%)`; g.beginPath(); g.moveTo(0, 690); for (let x = 0; x <= TW; x += 24) g.lineTo(x, 640 - Math.sin(x * 0.018 + c.index) * 22 - Math.sin(x * 0.05) * 8); g.lineTo(TW, 690); g.fill();
+      } else { g.fillStyle = p.ink("#000"); g.fillRect(0, 0, TW, TH); }
+      g.restore();
+      // gold foil frame
+      g.strokeStyle = p.gold(); g.lineWidth = 9; roundRect(g, 20, 20, TW - 40, TH - 40, 18); g.stroke();
+      g.lineWidth = 2.5; roundRect(g, 36, 36, TW - 72, TH - 72, 12); g.stroke();
+      g.lineWidth = 4; g.beginPath(); g.moveTo(66, 690); g.lineTo(66, 300); g.arc(TW / 2, 300, TW / 2 - 66, PI, 0); g.lineTo(TW - 66, 690); g.closePath(); g.stroke();
+      g.fillStyle = p.gold(); for (const [x, y] of [[36, 36], [TW - 36, 36], [36, TH - 36], [TW - 36, TH - 36]]) { g.save(); g.translate(x, y); g.rotate(PI / 4); g.fillRect(-9, -9, 18, 18); g.restore(); }
+      // numeral and name plates
+      g.fillStyle = p.ink("#3a1220"); roundRect(g, TW / 2 - 70, 62, 140, 62, 10); g.fill();
+      g.strokeStyle = p.gold(); g.lineWidth = 2; roundRect(g, TW / 2 - 70, 62, 140, 62, 10); g.stroke();
+      g.fillStyle = p.gold(); g.textAlign = "center"; g.textBaseline = "middle";
+      g.font = '52px "Marcellus SC", Georgia, serif'; g.fillText(c.num, TW / 2, 96);
+      g.fillStyle = p.ink("#3a1220"); roundRect(g, 60, 712, TW - 120, 78, 10); g.fill();
+      g.strokeStyle = p.gold(); roundRect(g, 60, 712, TW - 120, 78, 10); g.stroke();
+      let fs = 44; const nm = c.name.toUpperCase(); do { g.font = `${fs}px "Marcellus SC", Georgia, serif`; fs -= 2; } while (g.measureText(nm).width > TW - 150 && fs > 20);
+      g.fillStyle = p.gold(); g.fillText(nm, TW / 2, 752);
+      g.font = 'italic 24px "EB Garamond", Georgia, serif'; g.fillStyle = p.ink("#5a2030"); g.fillText(c.kw, TW / 2, 820);
+      grain(g, pass, 100 + c.index, 0.08);
+    }, [{ t: c.emb, x: TW / 2 - 150, y: 280, s: 300 }]);
+    if (reversed) for (const t of [mat.map, mat.roughnessMap, mat.bumpMap]) { t.center.set(0.5, 0.5); t.rotation = PI; }
+    return mat;
+  }
+  const backMat = cardMaterial((g, pass) => {
+    const p = P(g, pass);
+    g.fillStyle = p.paper("#4a1022"); g.fillRect(0, 0, TW, TH);
+    if (pass === "color") { const r = g.createRadialGradient(TW / 2, TH / 2, 40, TW / 2, TH / 2, 520); r.addColorStop(0, "rgba(160,50,80,.45)"); r.addColorStop(1, "rgba(0,0,0,.45)"); g.fillStyle = r; g.fillRect(0, 0, TW, TH); }
+    g.save(); roundRect(g, 46, 46, TW - 92, TH - 92, 10); g.clip();
+    g.strokeStyle = p.gold(); g.lineWidth = 1.6;
+    for (let i = -TH; i < TW + TH; i += 38) { g.beginPath(); g.moveTo(i, 0); g.lineTo(i + TH, TH); g.stroke(); g.beginPath(); g.moveTo(i, TH); g.lineTo(i + TH, 0); g.stroke(); }
+    g.fillStyle = p.gold(); for (let x = 0; x < TW + 40; x += 38) for (let y = 0; y < TH + 40; y += 38) { if ((x / 38 + y / 38) % 2) continue; g.beginPath(); g.arc(x, y, 2.2, 0, 7); g.fill(); }
+    g.restore();
+    g.fillStyle = p.paper("#3a0c1a"); g.beginPath(); g.arc(TW / 2, TH / 2, 150, 0, 7); g.fill();
+    g.strokeStyle = p.gold(); g.lineWidth = 9; roundRect(g, 20, 20, TW - 40, TH - 40, 18); g.stroke();
+    g.lineWidth = 3; roundRect(g, 46, 46, TW - 92, TH - 92, 10); g.stroke();
+    g.lineWidth = 4; g.beginPath(); g.arc(TW / 2, TH / 2, 150, 0, 7); g.stroke(); g.lineWidth = 1.5; g.beginPath(); g.arc(TW / 2, TH / 2, 138, 0, 7); g.stroke();
+    grain(g, pass, 7, 0.06);
+  }, [{ t: "back", x: TW / 2 - 130, y: TH / 2 - 130, s: 260 }, { t: "moon", x: TW / 2 - 40, y: 80, s: 80 }, { t: "sun", x: TW / 2 - 40, y: TH - 160, s: 80 }]);
+  const blankFace = new THREE.MeshStandardMaterial({ color: C(0xe9dcbd), roughness: 0.8 });
+  const edgeMat = new THREE.MeshStandardMaterial({ color: C(0xd9ae62), metalness: 1, roughness: 0.32 });
+
+  // Rounded card: two faces and a gilded edge.
+  const cardShape = (() => { const s = new THREE.Shape(), w = CW / 2, h = CH / 2, r = 0.016;
+    s.moveTo(-w + r, -h); s.lineTo(w - r, -h); s.quadraticCurveTo(w, -h, w, -h + r); s.lineTo(w, h - r); s.quadraticCurveTo(w, h, w - r, h);
+    s.lineTo(-w + r, h); s.quadraticCurveTo(-w, h, -w, h - r); s.lineTo(-w, -h + r); s.quadraticCurveTo(-w, -h, -w + r, -h); return s; })();
+  function faceGeo(mirror) { const g = new THREE.ShapeGeometry(cardShape, 6), p = g.attributes.position, uv = g.attributes.uv; for (let i = 0; i < uv.count; i++) { const u = p.getX(i) / CW + 0.5; uv.setXY(i, mirror ? 1 - u : u, p.getY(i) / CH + 0.5); } return g; }
+  const FRONT_GEO = faceGeo(false), BACK_GEO = faceGeo(true);
+  const EDGE_GEO = new THREE.ExtrudeGeometry(cardShape, { depth: CT, bevelEnabled: false, curveSegments: 6 }); EDGE_GEO.translate(0, 0, -CT / 2);
+  function makeCard(front) {
+    const g = new THREE.Group(); g.rotation.order = "YXZ";
+    const f = new THREE.Mesh(FRONT_GEO, front || blankFace); f.position.z = CT / 2 + 0.0003;
+    const b = new THREE.Mesh(BACK_GEO, backMat); b.rotation.y = PI; b.position.z = -CT / 2 - 0.0003;
+    const e = new THREE.Mesh(EDGE_GEO, edgeMat);
+    for (const m of [f, b, e]) { m.castShadow = true; m.receiveShadow = true; g.add(m); }
+    g.userData.front = f;
+    return g;
+  }
   (function buildCards() {
     const N = 14;
     for (let i = 0; i < N; i++) { const m = makeCard(); m.position.set(0.62 + (Math.random() - 0.5) * 0.006, 0.955 + i * CT * 1.05, -0.3 + (Math.random() - 0.5) * 0.006); m.rotation.set(PI / 2, 0.32 + (Math.random() - 0.5) * 0.04, 0); scene.add(m); deckMeshes.push(m); }
     deckTop = V(0.62, 0.955 + N * CT * 1.05 + 0.002, -0.3);
-    for (let i = 0; i < 3; i++) { const fm = new THREE.MeshStandardMaterial({ color: C(0xf6ecd6), roughness: 0.55, emissive: C(0xffffff), emissiveIntensity: 0 }); const m = makeCard(fm); m.visible = false; m.userData = { fm, i, hover: 0 }; scene.add(m); dealt.push(m); }
+    for (let i = 0; i < 3; i++) { const m = makeCard(); m.visible = false; Object.assign(m.userData, { i, hover: 0 }); scene.add(m); dealt.push(m); }
   })();
+  // Invisible, fixed hit areas for the three dealt cards and the two cut piles. Hover is tested
+  // against these, not the cards, so a card lifting under the cursor can't flicker on and off.
+  const hitMat = new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide });
+  const cardHits = [0, 1, 2].map((i) => { const m = new THREE.Mesh(new THREE.PlaneGeometry(CW * 1.3, CH * 1.2), hitMat); m.rotation.order = "YXZ"; m.userData.i = i; scene.add(m); return m; });
+  const pileHits = [0, 1].map((i) => { const m = new THREE.Mesh(new THREE.PlaneGeometry(CW * 1.3, CH * 1.2), hitMat); m.rotation.order = "YXZ"; m.userData.i = i; m.position.y = -10; scene.add(m); return m; });
+  function placeHit(m, p, ry) { m.position.set(p.x, p.y + 0.03, p.z); m.rotation.set(-PI / 2, ry, 0); }
   function moveCard(c, pos, rot, dur, arc = 0, scale = null, delay = 0) {
     let p0, r0, s0, init = false;
     return anim(dur, (p) => {
@@ -391,10 +793,11 @@ export function createScene(canvas, hooks) {
       mira.arms[1].target.copy(cutAt.clone().add(V(0.05, 0.07, -0.1)));
       await Promise.all(top.map((c, j) => moveCard(c, V(cutAt.x + rnd(-0.003, 0.003), HOME.y + j * LAYER, cutAt.z), flat(HOME_RY - 0.15), 0.5, 0.08)));
       restHands(); cutPiles = [top, bottom];
+      placeHit(pileHits[0], cutAt, HOME_RY - 0.15); placeHit(pileHits[1], HOME, HOME_RY);
       deckMeshes.forEach((c) => { c.userData.base = c.position.clone(); c.userData.pile = top.includes(c) ? 0 : 1; });
       st.cutting = true;
       const choice = await new Promise((r) => (cutResolve = r));
-      st.cutting = false; pileHover[0] = pileHover[1] = 0; canvas.style.cursor = "";
+      st.cutting = false; pileHover[0] = pileHover[1] = 0; canvas.style.cursor = ""; pileHits.forEach((m) => (m.position.y = -10));
       deckMeshes.forEach((c) => { delete c.userData.base; delete c.userData.pile; });
       const onTop = cutPiles[choice], under = cutPiles[1 - choice];
       audio.bell(523.25, 0.04); mira.arms[choice === 0 ? 0 : 1].target.copy(V(choice === 0 ? 0.3 : 0.62, 1.12, -0.2));
@@ -407,6 +810,7 @@ export function createScene(canvas, hooks) {
     chooseCut(i) { if (st.cutting && cutResolve) { const r = cutResolve; cutResolve = null; r(i); } },
     async deal() {
       curSlots = slots.map((s) => ({ p: s.p.clone().add(V(rnd(-0.03, 0.03), 0, rnd(-0.025, 0.025))), ry: s.ry + rnd(-0.08, 0.08) }));
+      curSlots.forEach((sl, i) => placeHit(cardHits[i], sl.p, sl.ry));
       const orders = [[0, 1, 2], [2, 1, 0], [1, 0, 2], [0, 2, 1]], order = orders[Math.floor(Math.random() * orders.length)];
       for (const i of order) {
         const c = dealt[i]; c.position.copy(deckTop); c.rotation.set(PI / 2, HOME_RY, 0); c.scale.setScalar(1); c.visible = true; c.userData.hover = 0;
@@ -418,9 +822,9 @@ export function createScene(canvas, hooks) {
     },
     // Turns over the chosen card. `card` is the deck entry the server revealed.
     async reveal(i, card, reversed) {
-      api.setChoosing(false); st.chosen = i; const c = dealt[i], fm = c.userData.fm;
-      if (fm.map) fm.map.dispose();
-      fm.map = faceTexture(card, reversed); fm.emissiveMap = fm.map; fm.color.set(0xffffff); fm.emissiveIntensity = 0.18; fm.needsUpdate = true;
+      api.setChoosing(false); st.chosen = i; const c = dealt[i], front = c.userData.front;
+      if (front.material !== blankFace) { const m = front.material; [m.map, m.roughnessMap, m.bumpMap].forEach((t) => t?.dispose()); m.dispose(); }
+      const fm = faceMaterial(card, reversed); fm.emissiveIntensity = 0.12; front.material = fm;
       dealt.forEach((d, j) => { if (j !== i) moveCard(d, deckTop.clone().add(V(0, 0.004 * j, 0)), V(PI / 2, 0.32, 0), 0.8, 0.15, null, 0.1).then(() => { d.visible = false; }); });
       mira.arms[1].target.copy(V(0.25, 1.08, -0.05)); st.thinking = true; st.lookMode = "card";
       await wait(0.45);
@@ -431,7 +835,7 @@ export function createScene(canvas, hooks) {
       await wait(1.3);
       gust = 1; burst(rp); orb.energy = 1; audio.chime(); audio.wind();
       try { navigator.vibrate && navigator.vibrate([30, 40, 60]); } catch { /* not supported */ }
-      anim(1.4, (p) => { fm.emissiveIntensity = 0.18 + 0.7 * Math.sin(PI * p); });
+      anim(1.4, (p) => { fm.emissiveIntensity = 0.12 + 0.6 * Math.sin(PI * p); });
       mira.arms.forEach((a) => a.target.copy(V(a.s * 0.4, 1.3, -0.38)));
       await wait(0.9);
       st.thinking = false; st.lookMode = "user"; st.reading = true; restHands();
@@ -444,12 +848,12 @@ export function createScene(canvas, hooks) {
       const moves = dealt.filter((d) => d.visible).map((d) => moveCard(d, deckTop, V(PI / 2, 0.32, 0), 0.9, 0.2, 1).then(() => { d.visible = false; }));
       await Promise.all(moves); st.chosen = -1;
     },
-    dispose() { disposed = true; cancelAnimationFrame(raf); removeEventListener("resize", fit); removeEventListener("pointermove", onMove); canvas.removeEventListener("pointerdown", onDown); canvas.removeEventListener("pointerup", endHold); canvas.removeEventListener("pointercancel", endHold); renderer.dispose(); },
+    dispose() { disposed = true; cancelAnimationFrame(raf); removeEventListener("resize", fit); removeEventListener("pointermove", onMove); canvas.removeEventListener("pointerdown", onDown); canvas.removeEventListener("pointerup", endHold); canvas.removeEventListener("pointercancel", endHold); pmrem.dispose(); renderer.dispose(); },
   };
 
   /* ---------- input ---------- */
-  function hitCard() { raycaster.setFromCamera(ndc, camera); const hit = raycaster.intersectObjects(dealt.filter((d) => d.visible))[0]; return hit ? hit.object.userData.i : -1; }
-  function hitPile() { raycaster.setFromCamera(ndc, camera); const hit = raycaster.intersectObjects(deckMeshes)[0]; return hit && hit.object.userData.pile != null ? hit.object.userData.pile : -1; }
+  function hitCard() { if (!dealt.some((d) => d.visible)) return -1; raycaster.setFromCamera(ndc, camera); const hit = raycaster.intersectObjects(cardHits, false)[0]; return hit ? hit.object.userData.i : -1; }
+  function hitPile() { raycaster.setFromCamera(ndc, camera); const hit = raycaster.intersectObjects(pileHits, false)[0]; return hit ? hit.object.userData.i : -1; }
   function onMove(e) { pointer.set((e.clientX / innerWidth) * 2 - 1, -((e.clientY / innerHeight) * 2 - 1)); if (e.target === canvas) ndc.copy(pointer); else ndc.set(-9, -9); }
   function onDown(e) {
     ndc.set((e.clientX / innerWidth) * 2 - 1, -((e.clientY / innerHeight) * 2 - 1));
@@ -471,7 +875,7 @@ export function createScene(canvas, hooks) {
   fit();
 
   /* ---------- frame loop ---------- */
-  let blinkAt = 2, headYaw = 0, headPitch = 0;
+  let blinkAt = 2, headYaw = 0, headPitch = 0, saccadeAt = 1; const sacc = new THREE.Vector2(), face = { open: 0, at: 0, q: [0, 0, 0, 0] };
   function loop() {
     if (disposed) return; raf = requestAnimationFrame(loop);
     const dt = Math.min(clock.getDelta(), 0.05); t += dt;
@@ -491,23 +895,26 @@ export function createScene(canvas, hooks) {
     orb.light.intensity = 0.4 + oe * 0.7 + breath * 0.8; orb.halo.material.opacity = 0.35 + oe * 0.35; orb.halo.scale.setScalar(0.6 + oe * 0.25 + breath * 0.45);
     orb.inner.forEach((o) => { const a = t * o.sp2 * (st.thinking ? 3 : 1) + o.ph; o.sp.position.set(Math.cos(a) * 0.05, 0.17 + Math.sin(a * 1.3) * 0.04, Math.sin(a) * 0.05); });
     const dp = dust.geometry.attributes.position; for (let i = 0; i < dp.count; i++) { let y = dp.getY(i) + dt * 0.02; if (y > 3.6) y = 0.9; dp.setY(i, y); dp.setX(i, dp.getX(i) + Math.sin(t * 0.3 + i) * 0.0004); } dp.needsUpdate = true;
-    mira.torso.scale.y = 1 + Math.sin(t * 1.5) * 0.006; mira.head.position.y = 1.86 + Math.sin(t * 1.5) * 0.004;
+    mira.torso.scale.y = 1 + Math.sin(t * 1.5) * 0.006; mira.head.position.y = 1.83 + Math.sin(t * 1.5) * 0.004;
     let target;
     if (st.lookMode === "card" && st.chosen >= 0) target = dealt[st.chosen].position;
     else if (hovered >= 0) target = dealt[hovered].position;
     else if (st.shuffling) target = V(0.55, 1, -0.3);
     else if (st.choosing || st.cutting) target = V(pointer.x * 1.2, 1.2 + pointer.y * 0.4, 2);
     else target = camera.position.clone().add(V(pointer.x * 0.4, pointer.y * 0.2, 0));
-    const d = target.clone().sub(V(0, 1.86, -0.95));
+    const d = target.clone().sub(V(0, 1.83, -0.95));
     const yaw = THREE.MathUtils.clamp(Math.atan2(d.x, d.z), -0.55, 0.55), pitch = THREE.MathUtils.clamp(-Math.atan2(d.y, Math.hypot(d.x, d.z)), -0.15, 0.45);
     headYaw += (yaw - headYaw) * (1 - Math.exp(-dt * 3)); headPitch += (pitch - headPitch) * (1 - Math.exp(-dt * 3));
     const nod = st.talking ? Math.sin(t * 2.3) * 0.02 : 0;
     mira.head.rotation.set(headPitch * 0.7 + nod, headYaw * 0.75, Math.sin(t * 0.7) * 0.025);
-    mira.eyes.forEach((e) => e.userData.iris.rotation.set(headPitch * 0.4, headYaw * 0.5, 0));
-    blinkAt -= dt; let bl = 1; if (blinkAt < 0.14) bl = Math.max(0.06, Math.abs(blinkAt - 0.07) / 0.07); if (blinkAt < 0) blinkAt = 2 + Math.random() * 3.5;
-    mira.eyes.forEach((e) => (e.scale.y = bl));
-    const ms = st.talking ? 0.75 + Math.abs(Math.sin(t * 15)) * 1.3 * (0.6 + 0.4 * Math.sin(t * 4.3)) : 1;
-    mira.mouth.scale.y += (ms - mira.mouth.scale.y) * (1 - Math.exp(-dt * 20));
+    // her eyes glance with small natural flicks, lids follow when she looks down, and she blinks
+    saccadeAt -= dt; if (saccadeAt < 0) { saccadeAt = 0.8 + Math.random() * 2.2; sacc.set((Math.random() - 0.5) * 0.14, (Math.random() - 0.5) * 0.08); }
+    blinkAt -= dt; let bl = 1; if (blinkAt < 0.16) bl = Math.min(1, Math.abs(blinkAt - 0.08) / 0.08); if (blinkAt < 0) blinkAt = 2 + Math.random() * 3.5;
+    const lidDrop = clamp(headPitch * 0.9, 0, 0.35);
+    const mo = st.talking ? 0.15 + Math.abs(Math.sin(t * 11)) * 0.45 * (0.6 + 0.4 * Math.sin(t * 3.7)) : 0;
+    face.open += (mo - face.open) * (1 - Math.exp(-dt * 16));
+    const fq = [Math.round(Math.max(1 - bl, lidDrop) * 8) / 8, Math.round(face.open * 6) / 6, Math.round(clamp(sacc.x * 5, -0.6, 0.6) * 6) / 6, Math.round(clamp(sacc.y * 5 - headPitch * 1.3, -0.8, 0.5) * 6) / 6];
+    if (fq.some((v, i) => v !== face.q[i]) && t - face.at > 0.033) { face.q = fq; face.at = t; drawFace(...fq); }
     mira.ears.forEach((e, i) => { e.rotation.z = Math.sin(t * 2 + i) * 0.12 + headYaw * -0.3; });
     mira.arms.forEach((a) => {
       let tg = a.target.clone();
@@ -528,7 +935,7 @@ export function createScene(canvas, hooks) {
       if (h !== hovered) { hovered = h; canvas.style.cursor = h >= 0 ? "pointer" : ""; if (h >= 0) audio.bell(1318.5, 0.02); }
       dealt.forEach((c, i) => {
         const s = curSlots[i]; c.userData.hover += ((i === hovered ? 1 : 0) - c.userData.hover) * (1 - Math.exp(-dt * 10));
-        const hv = c.userData.hover, hold = i === holdIdx ? holdT : 0, jit = (Math.random() - 0.5) * 0.006 * hold;
+        const hv = c.userData.hover, hold = i === holdIdx ? holdT : 0, jit = Math.sin(t * 38 + i * 2) * 0.0015 * hold;
         c.position.set(s.p.x + jit, s.p.y + hv * 0.06 + hold * 0.1 + Math.sin(t * 2 + i) * 0.003, s.p.z + hv * 0.04 + jit); c.rotation.set(PI / 2 - hv * 0.45 - hold * 0.2, s.ry, 0);
       });
       if (holdIdx >= 0) {
@@ -547,8 +954,11 @@ export function createScene(canvas, hooks) {
       u.vel.forEach((v, i) => { v.y -= dt * 0.35; v.multiplyScalar(1 - dt * 1.2); a.setXYZ(i, a.getX(i) + v.x * dt, a.getY(i) + v.y * dt, a.getZ(i) + v.z * dt); });
       a.needsUpdate = true; sparks.material.opacity = Math.max(0, u.life / 2.2) * (0.7 + 0.3 * Math.random());
     }
+    grade.uniforms.time.value = t % 100;
     composer.render();
   }
+  // Development only: move the camera from the browser console to inspect the models.
+  if (process.env.NODE_ENV !== "production") { window.__miraCam = (p, l) => { camTarget.set(...p); camPos.set(...p); camLook.set(...l); }; window.__miraFace = drawFace; }
   loop();
   return api;
 }

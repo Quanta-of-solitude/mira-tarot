@@ -4,7 +4,6 @@ import { currentUser, json } from "@/lib/session";
 import { setDisplayName, listReadings } from "@/lib/store";
 import { emailEnabled } from "@/lib/email";
 import { paymentConfig } from "@/lib/payments";
-import { aiEnabled } from "@/lib/reading";
 import { PACKS, DECK } from "@/lib/tarot";
 
 const pub = (u, last) => u && {
@@ -25,7 +24,7 @@ export async function GET() {
     config: {
       packs: Object.values(PACKS),
       payment: paymentConfig(),
-      emailEnabled, adminKey: !!process.env.ADMIN_KEY, devCodes: !emailEnabled && process.env.NODE_ENV !== "production", aiEnabled,
+      emailEnabled, adminKey: !!process.env.ADMIN_KEY, devCodes: !emailEnabled && process.env.NODE_ENV !== "production",
       supportEmail: process.env.NEXT_PUBLIC_SUPPORT_EMAIL || null,
     },
   });
