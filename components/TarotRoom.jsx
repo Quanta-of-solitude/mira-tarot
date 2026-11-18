@@ -501,7 +501,7 @@ export default function TarotRoom() {
         </div>
       )}
 
-      <footer className="legal"><a href="/terms">Terms</a><a href="/privacy">Privacy</a><a href="/refunds">Refunds</a><a href="/delivery">Delivery</a><a href="/contact">Contact</a></footer>
+      <footer className="legal"><a href="/about">About</a><a href="/terms">Terms</a><a href="/privacy">Privacy</a><a href="/refunds">Refunds</a><a href="/delivery">Delivery</a><a href="/contact">Contact</a></footer>
     </>
   );
 }

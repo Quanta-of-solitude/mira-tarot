@@ -10,7 +10,7 @@ export default function Privacy() {
     <article className="doc">
       <p><a href="/">← Back to the room</a></p>
       <h1>Privacy Policy</h1>
-      <p>This policy explains what Mira&apos;s Tarot Room{site.owner ? `, operated by ${site.owner},` : ""} collects and why.</p>
+      <p>This policy explains what Mira&apos;s Tarot Room collects and why.</p>
       <h2>What we collect</h2>
       <p>Your email address; the name you ask Mira to call you; the details you give for your readings (date of birth, and optionally where you were born, where you live, your work and your relationship status); the questions you ask and the readings you receive; your purchases; and a device identifier cookie used to prevent abuse of free readings.</p>
       <h2>How we use it</h2>

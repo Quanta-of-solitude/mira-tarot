@@ -6,13 +6,11 @@ const prices = () => Object.values(PACKS).map((p) => `${rupees(p)} for ${p.credi
 
 export const metadata = { title: "Terms · Mira's Tarot Room" };
 export default function Terms() {
-  const missing = !site.owner || !site.address;
   return (
     <article className="doc">
       <p><a href="/">← Back to the room</a></p>
       <h1>Terms of Use</h1>
-      {missing && <p className="todo">Set BUSINESS_NAME and BUSINESS_ADDRESS in the hosting settings to complete this page.</p>}
-      <p>Mira&apos;s Tarot Room is operated by {site.owner || "[your name]"}, {site.address || "[address]"}, India. By using this site you agree to these terms.</p>
+      <p>Mira&apos;s Tarot Room is an online service based in India. The operator&apos;s details are on our <a href="/contact">Contact</a> page. By using this site you agree to these terms.</p>
       <h2>Entertainment only</h2>
       <p>Readings are for reflection and entertainment. They are not predictions of fact and are not medical, legal, financial or psychological advice. Do not make important decisions based on a reading.</p>
       <h2>Accounts</h2>
