@@ -42,6 +42,7 @@ export default function TarotRoom() {
   const [history, setHistory] = useState(null), [breathIn, setBreathIn] = useState(false), [busy, setBusy] = useState(false);
   const [force, setForce] = useState({ index: "", orient: "", ritual: "on" });
   const [prof, setProf] = useState(EMPTY_PROFILE);
+  const [mock, setMock] = useState(null); // test checkout: { orderId, amount, label, method, step, upi, card, expiry, cvv, otp, error }
   const run = useRef(0), readingId = useRef(null), sayTok = useRef(0), queue = useRef(Promise.resolve()), skipBreath = useRef(null), meRef = useRef(null), forceRef = useRef(force);
   meRef.current = me; forceRef.current = force;
 
@@ -234,6 +235,10 @@ export default function TarotRoom() {
     try {
       const res = await post("/api/pay/order", { pack: packId, phone }); const d = await res.json();
       if (!res.ok) { setNotice(d.error || "Could not start the payment."); return; }
+      if (d.provider === "mock") {
+        setMock({ orderId: d.orderId, amount: d.amount, label: d.label, method: "upi", step: "form", upi: "", card: "", expiry: "", cvv: "", otp: "", error: "" });
+        setModal("mockpay"); return;
+      }
       if (d.provider === "cashfree") {
         try { localStorage.setItem("mira_phone", phone); } catch { /* storage blocked */ }
         await loadScript("https://sdk.cashfree.com/js/v3/cashfree.js");
@@ -257,6 +262,20 @@ export default function TarotRoom() {
       }).open();
     } catch (err) { console.error(err); setNotice("The payment window could not open. Check your connection and try again."); }
     finally { setBusy(false); }
+  }
+
+  // Test checkout: the server decides with the test values in lib/mockpay.js.
+  async function mockPay(e) {
+    e?.preventDefault(); if (!mock || mock.step === "processing") return;
+    if (mock.method === "card" && mock.step === "form") { setMock({ ...mock, step: "otp", error: "" }); return; }
+    const m = mock; setMock({ ...m, step: "processing", error: "" });
+    await sleep(1400);
+    const v = await post("/api/pay/verify", { orderId: m.orderId, mock: { method: m.method, upi: m.upi, card: m.card, expiry: m.expiry, cvv: m.cvv, otp: m.otp } });
+    const vd = await v.json().catch(() => ({}));
+    if (!v.ok || !vd.paid) { setMock({ ...m, step: "failed", error: vd.reason || vd.error || "The payment failed." }); return; }
+    setMock({ ...m, step: "done" }); setMe((x) => (x ? { ...x, credits: vd.credits } : x));
+    await sleep(1300);
+    setMock(null); setModal(null); say("The cards welcome you back. Ask, and I will shuffle.");
   }
 
   async function openJournal() {
@@ -428,7 +447,7 @@ export default function TarotRoom() {
             </label>
           )}
           {notice && <p className="err">{notice}</p>}
-          <p className="note">{cfg?.payment ? `Secure payment by ${cfg.payment.provider === "cashfree" ? "Cashfree" : "Razorpay"}: UPI, cards, netbanking and wallets.` : "Payments are not set up yet."} See the <a href="/refunds">refund policy</a>.</p>
+          <p className="note">{cfg?.payment?.provider === "mock" ? "Test payments: no real money is charged." : cfg?.payment ? `Secure payment by ${cfg.payment.provider === "cashfree" ? "Cashfree" : "Razorpay"}: UPI, cards, netbanking and wallets.` : "Payments are not set up yet."} See the <a href="/refunds">refund policy</a>.</p>
           <button className="linkbtn" onClick={() => setModal(null)}>Not now</button>
         </div></div>
       )}
@@ -463,6 +482,48 @@ export default function TarotRoom() {
           </form>
           {notice && <p className="err">{notice}</p>}
           {me?.profile?.dob && <button className="linkbtn" onClick={() => setModal(null)}>Close</button>}
+        </div></div>
+      )}
+
+      {modal === "mockpay" && mock && (
+        <div className="veil" role="dialog" aria-modal="true" aria-labelledby="mpT"><div className="offer mockpay">
+          <div className="testband">TEST MODE · no real money moves</div>
+          <h3 id="mpT">{rupees(mock.amount)}</h3>
+          <p className="note">Mira&apos;s Tarot Room · {mock.label}</p>
+          {mock.step === "processing" && <div className="mp-state"><div className="spinner" aria-hidden="true" /><p>Processing payment…</p></div>}
+          {mock.step === "done" && <div className="mp-state"><div className="tick" aria-hidden="true">✓</div><p>Payment successful. Questions added.</p></div>}
+          {mock.step === "failed" && (
+            <div className="mp-state"><div className="cross" aria-hidden="true">✕</div><p>{mock.error}</p>
+              <button className="ghost" onClick={() => setMock({ ...mock, step: "form", otp: "", error: "" })}>Try again</button></div>
+          )}
+          {(mock.step === "form" || mock.step === "otp") && (
+            <form className="mp-form" onSubmit={mockPay} autoComplete="off">
+              {mock.step === "form" && (<>
+                <div className="mp-tabs" role="tablist">
+                  {[["upi", "UPI"], ["card", "Card"]].map(([k, l]) => (
+                    <button type="button" role="tab" key={k} aria-selected={mock.method === k} className={mock.method === k ? "on" : ""} onClick={() => setMock({ ...mock, method: k, error: "" })}>{l}</button>
+                  ))}
+                </div>
+                {mock.method === "upi" ? (
+                  <label>UPI ID<input id="mp-upi" placeholder="success@test" value={mock.upi} onChange={(e) => setMock({ ...mock, upi: e.target.value })} autoFocus /></label>
+                ) : (<>
+                  <label>Card number<input id="mp-card" inputMode="numeric" placeholder="4111 1111 1111 1111" value={mock.card} onChange={(e) => setMock({ ...mock, card: e.target.value.replace(/[^\d ]/g, "").slice(0, 23) })} autoFocus /></label>
+                  <div className="mp-row">
+                    <label>Expiry<input id="mp-exp" placeholder="MM/YY" value={mock.expiry} onChange={(e) => setMock({ ...mock, expiry: e.target.value.slice(0, 5) })} /></label>
+                    <label>CVV<input id="mp-cvv" inputMode="numeric" placeholder="123" value={mock.cvv} onChange={(e) => setMock({ ...mock, cvv: e.target.value.replace(/\D/g, "").slice(0, 3) })} /></label>
+                  </div>
+                </>)}
+                <p className="mp-hint">{mock.method === "upi" ? "Approve: success@test · Decline: failure@test" : "Approve: 4111 1111 1111 1111 · Decline: 4000 0000 0000 0002 · any future expiry, any CVV"}</p>
+              </>)}
+              {mock.step === "otp" && (<>
+                <p>Enter the OTP sent by your bank.</p>
+                <label>OTP<input id="mp-otp" inputMode="numeric" maxLength={6} placeholder="••••••" className="codein" value={mock.otp} onChange={(e) => setMock({ ...mock, otp: e.target.value.replace(/\D/g, "") })} autoFocus /></label>
+                <p className="mp-hint">Test OTP: 123456</p>
+              </>)}
+              <button className="cta" type="submit">{mock.step === "otp" ? "Verify and pay" : `Pay ${rupees(mock.amount)}`}</button>
+            </form>
+          )}
+          {mock.step !== "processing" && mock.step !== "done" && <button className="linkbtn" onClick={() => { setMock(null); setModal("paywall"); }}>Cancel</button>}
         </div></div>
       )}
 

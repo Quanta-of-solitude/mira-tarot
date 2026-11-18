@@ -25,7 +25,7 @@ export async function GET() {
     user: pub(u, last),
     config: {
       packs: Object.values(PACKS),
-      payment: paymentConfig(),
+      payment: paymentConfig(u),
       emailEnabled, adminKey: !!process.env.ADMIN_KEY, devCodes: !emailEnabled && process.env.NODE_ENV !== "production",
       supportEmail: site.supportEmail,
     },

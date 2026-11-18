@@ -2,6 +2,7 @@ import { currentUser, json } from "@/lib/session";
 import { creditPayment, getPayment, getUser } from "@/lib/store";
 import { validSignature } from "@/lib/razorpay";
 import { getOrder } from "@/lib/cashfree";
+import { judge, mockAllowed } from "@/lib/mockpay";
 
 // Called by the browser after checkout. Credits are added only when the provider confirms the payment.
 export async function POST(req) {
@@ -21,6 +22,17 @@ export async function POST(req) {
   const orderId = String(b.orderId || "");
   const p = await getPayment(orderId);
   if (!p || p.userId !== u.id) return json({ error: "Order not found." }, 404);
+
+  // Test payments: approved or declined by the test values, never by real money.
+  if (orderId.startsWith("test_")) {
+    if (!mockAllowed(u)) return json({ error: "Test payments are off." }, 403);
+    if (p.status !== "paid") {
+      const r = judge(b.mock || {});
+      if (!r.paid) return json({ paid: false, reason: r.reason, credits: u.credits });
+      await creditPayment({ orderId, paymentId: `test_pay_${Date.now()}` });
+    }
+    return json({ paid: true, credits: (await getUser(u.id)).credits });
+  }
   if (p.status !== "paid") {
     try {
       const order = await getOrder(orderId);

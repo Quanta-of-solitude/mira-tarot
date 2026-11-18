@@ -5,16 +5,23 @@ import { PACKS } from "@/lib/tarot";
 import { provider } from "@/lib/payments";
 import { razorpay } from "@/lib/razorpay";
 import { createOrder } from "@/lib/cashfree";
+import { mockOn, mockAllowed } from "@/lib/mockpay";
 
 // Creates an order with the payment provider. The price comes from the server's pack table, never from the client.
 export async function POST(req) {
   const u = await currentUser();
   if (!u) return json({ error: "signin" }, 401);
-  const p = provider();
-  if (!p) return json({ error: "Payments are not set up yet." }, 503);
   const body = await req.json().catch(() => ({}));
   const pack = PACKS[body.pack];
   if (!pack) return json({ error: "Unknown pack." }, 400);
+  if (mockOn()) {
+    if (!mockAllowed(u)) return json({ error: "Payments are not set up yet." }, 503);
+    const orderId = `test_${Date.now()}_${randomBytes(3).toString("hex")}`;
+    await createPayment({ orderId, userId: u.id, pack: pack.id, amount: pack.amount, credits: pack.credits });
+    return json({ provider: "mock", orderId, amount: pack.amount, label: pack.label });
+  }
+  const p = provider();
+  if (!p) return json({ error: "Payments are not set up yet." }, 503);
   // The public address of the site: APP_URL if set (e.g. a tunnel to localhost), else the address the request came in on.
   const fwdHost = req.headers.get("x-forwarded-host"), fwdProto = req.headers.get("x-forwarded-proto");
   const origin = (process.env.APP_URL || (fwdHost ? `${fwdProto || "https"}://${fwdHost}` : new URL(req.url).origin)).replace(/\/$/, "");
