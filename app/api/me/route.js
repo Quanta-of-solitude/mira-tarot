@@ -1,13 +1,14 @@
 import { cookies } from "next/headers";
 import { randomUUID } from "node:crypto";
 import { currentUser, json } from "@/lib/session";
-import { setDisplayName, listReadings } from "@/lib/store";
+import { setDisplayName, setProfile, listReadings } from "@/lib/store";
+import { validateProfile } from "@/lib/profile";
 import { emailEnabled } from "@/lib/email";
 import { paymentConfig } from "@/lib/payments";
 import { PACKS, DECK } from "@/lib/tarot";
 
 const pub = (u, last) => u && {
-  email: u.email, name: u.displayName || null, image: u.image, credits: u.credits, isAdmin: u.isAdmin,
+  email: u.email, name: u.displayName || null, image: u.image, credits: u.credits, isAdmin: u.isAdmin, profile: u.profile || null,
   lastCard: last ? DECK[last.cards[last.picked].index].name : null,
 };
 
@@ -36,6 +37,12 @@ export async function POST(req) {
   const body = await req.json().catch(() => ({}));
   const name = String(body.name || "").replace(/[^\p{L}\p{M} .'-]/gu, "").trim().slice(0, 30);
   if (!name) return json({ error: "Please enter a name." }, 400);
-  const saved = await setDisplayName(u.id, name);
+  if (body.dob === undefined) {
+    const saved = await setDisplayName(u.id, name);
+    return json({ user: pub({ ...saved, isAdmin: u.isAdmin }, null) });
+  }
+  const v = validateProfile(body);
+  if (v.error) return json({ error: v.error }, 400);
+  const saved = await setProfile(u.id, name, v.profile);
   return json({ user: pub({ ...saved, isAdmin: u.isAdmin }, null) });
 }

@@ -201,7 +201,8 @@ export function createScene(canvas, hooks) {
   const LIP_SEAM = [[-0.165, -0.545], [-0.09, -0.551], [0, -0.555], [0.09, -0.551], [0.165, -0.545]];
   const LIP_BOT = [[-0.165, -0.545], [-0.12, -0.584], [-0.05, -0.612], [0, -0.616], [0.05, -0.612], [0.12, -0.584], [0.165, -0.545]];
 
-  function drawFace(blink, open, gx, gy) {
+  // smile: 0 neutral … 1 a warm, open smile (lip corners rise, lower lids lift, cheeks warm, brows soften upward)
+  function drawFace(blink, open, gx, gy, smile = 0.25) {
     const g = fg;
     g.clearRect(0, 0, FC, FC);
     const trace = (px, close) => { g.beginPath(); px.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y))); if (close) g.closePath(); };
@@ -217,7 +218,7 @@ export function createScene(canvas, hooks) {
 
     // soft makeup: blush, highlights, contour
     for (const s of [-1, 1]) {
-      blob(s * 0.43, -0.2, 80, 52, "215,105,110", 0.24);
+      blob(s * 0.43, -0.2 + smile * 0.015, 80, 52, "215,105,110", 0.22 + smile * 0.1);
       blob(s * 0.4, -0.07, 48, 22, "255,214,190", 0.14);
     }
     blob(0, -0.665, 46, 12, "110,55,40", 0.22);
@@ -236,7 +237,8 @@ export function createScene(canvas, hooks) {
 
     // brows: soft arch, full at the start, tapering to a fine tail
     for (const s of [-1, 1]) {
-      const px = spline([[0.16, 0.245], [0.25, 0.292], [0.36, 0.316], [0.47, 0.298], [0.56, 0.245]].map(([x, y]) => [s * x, y]), 12);
+      const lift = smile * 0.012;
+      const px = spline([[0.16, 0.245 + lift * 1.3], [0.25, 0.292 + lift], [0.36, 0.316 + lift * 0.6], [0.47, 0.298], [0.56, 0.245]].map(([x, y]) => [s * x, y]), 12);
       const top = [], bot = [];
       px.forEach((p, i) => {
         const q = px[Math.min(px.length - 1, i + 1)], o = px[Math.max(0, i - 1)], dx = q[0] - o[0], dy = q[1] - o[1], L = Math.hypot(dx, dy) || 1;
@@ -259,7 +261,8 @@ export function createScene(canvas, hooks) {
       blob(s * 0.33, 0.215, 60, 16, "255,215,190", 0.14 * (1 - blink));
       g.strokeStyle = `rgba(95,48,42,${0.38 * (1 - blink * 0.7)})`; g.lineWidth = 2.6;
       trace(spline(mir([[0.2, 0.135 - 0.05 * blink], [0.3, 0.205 - 0.07 * blink], [0.42, 0.2 - 0.07 * blink], [0.51, 0.13 - 0.02 * blink]]))); g.stroke();
-      const upPx = spline(mir(up)), lowPx = spline(mir(EYE_LOW));
+      const low = EYE_LOW.map(([x, y], i) => [x, y + (i > 0 && i < EYE_LOW.length - 1 ? smile * 0.016 : 0)]);
+      const upPx = spline(mir(up)), lowPx = spline(mir(low));
       if (blink < 0.96) {
         g.save(); trace(upPx.concat(lowPx.slice().reverse()), true); g.clip();
         const [ex, ey] = fpx(s * 0.345, 0.085);
@@ -299,10 +302,12 @@ export function createScene(canvas, hooks) {
 
     // lips: a gentle closed smile that parts when she speaks
     const bell = (x) => Math.exp(-(x * x) / 0.012);
-    const seamU = LIP_SEAM.map(([x, y]) => [x, y + open * 0.018 * bell(x)]);
-    const seamL = LIP_SEAM.map(([x, y]) => [x, y - open * 0.05 * bell(x)]);
-    const bot = LIP_BOT.map(([x, y]) => [x, y - open * 0.045 * bell(x) * 1.4]);
-    const sU = spline(seamU), sL = spline(seamL), top = spline(LIP_TOP), btm = spline(bot);
+    const up = (x) => smile * 0.05 * Math.abs(x / 0.165) ** 2.4; // corners rise as she smiles
+    const wide = (x) => x * (1 + smile * 0.13);
+    const seamU = LIP_SEAM.map(([x, y]) => [wide(x), y + up(x) + open * 0.018 * bell(x)]);
+    const seamL = LIP_SEAM.map(([x, y]) => [wide(x), y + up(x) - open * 0.05 * bell(x)]);
+    const bot = LIP_BOT.map(([x, y]) => [wide(x), y + up(x) * 0.8 - open * 0.045 * bell(x) * 1.4]);
+    const sU = spline(seamU), sL = spline(seamL), top = spline(LIP_TOP.map(([x, y]) => [wide(x), y + up(x) * 0.7])), btm = spline(bot);
     if (open > 0.03) {
       g.fillStyle = "#33090f"; trace(sU.concat(sL.slice().reverse()), true); g.fill();
       g.save(); trace(sU.concat(sL.slice().reverse()), true); g.clip();
@@ -318,8 +323,9 @@ export function createScene(canvas, hooks) {
     blob(-0.04, -0.512, 14, 5, "255,200,205", 0.25);
     g.strokeStyle = "rgba(60,12,22,.85)"; g.lineWidth = open > 0.03 ? 1.5 : 2.6; trace(sU); g.stroke();
     for (const s of [-1, 1]) {
-      g.strokeStyle = "rgba(110,50,45,.35)"; g.lineWidth = 2;
-      trace(spline([[s * 0.162, -0.548], [s * 0.18, -0.537], [s * 0.19, -0.522]], 5)); g.stroke();
+      g.strokeStyle = `rgba(110,50,45,${0.25 + smile * 0.25})`; g.lineWidth = 2;
+      const cx = wide(0.165), cy = -0.545 + smile * 0.05;
+      trace(spline([[s * (cx - 0.003), cy - 0.003], [s * (cx + 0.015), cy + 0.008 + smile * 0.006], [s * (cx + 0.025), cy + 0.023 + smile * 0.01]], 5)); g.stroke();
     }
     faceLayerTex.needsUpdate = true;
   }
@@ -885,7 +891,7 @@ export function createScene(canvas, hooks) {
       anim(1.4, (p) => { fm.emissiveIntensity = 0.12 + 0.6 * Math.sin(PI * p); });
       mira.arms.forEach((a) => a.target.copy(V(a.s * 0.4, 1.3, -0.38)));
       await wait(0.9);
-      st.thinking = false; st.lookMode = "user"; st.reading = true; restHands();
+      st.thinking = false; st.lookMode = "user"; st.reading = true; st.revealAt = t; st.revealSmile = reversed || [13, 15, 16, 18].includes(card.index) ? 0.45 : 0.85; restHands(); // a gentler smile for heavy cards
       camTarget = camBase.clone().add(V(0, -0.05, -0.35));
     },
     // Returns whatever is on the table to the deck.
@@ -934,7 +940,7 @@ export function createScene(canvas, hooks) {
     else if (avg < 1 / 56 && pr < maxPR) { if (++perf.good >= 4) { pr = Math.min(maxPR, Math.round((pr + 0.1) * 100) / 100); perf.good = 0; perf.wait = 1; fit(); } }
     else perf.good = 0;
   }
-  let blinkAt = 2, headYaw = 0, headPitch = 0, saccadeAt = 1; const sacc = new THREE.Vector2(), face = { open: 0, at: 0, q: [0, 0, 0, 0] };
+  let blinkAt = 2, headYaw = 0, headPitch = 0, saccadeAt = 1; const sacc = new THREE.Vector2(), face = { open: 0, at: 0, q: [0, 0, 0, 0, 0], smile: 0.28, shut: 0 };
   function loop() {
     if (disposed) return; raf = requestAnimationFrame(loop);
     const rawDt = clock.getDelta(), dt = Math.min(rawDt, 0.05); t += dt;
@@ -973,7 +979,11 @@ export function createScene(canvas, hooks) {
     const lidDrop = clamp(headPitch * 0.9, 0, 0.35);
     const mo = st.talking ? 0.15 + Math.abs(Math.sin(t * 11)) * 0.45 * (0.6 + 0.4 * Math.sin(t * 3.7)) : 0;
     face.open += (mo - face.open) * (1 - Math.exp(-dt * 16));
-    const fq = [Math.round(Math.max(1 - bl, lidDrop) * 8) / 8, Math.round(face.open * 6) / 6, Math.round(clamp(sacc.x * 5, -0.6, 0.6) * 6) / 6, Math.round(clamp(sacc.y * 5 - headPitch * 1.3, -0.8, 0.5) * 6) / 6];
+    // her mood: eyes closed while she meditates over the orb, a warm smile when the card is revealed
+    const meditating = st.thinking && !st.shuffling && st.chosen < 0;
+    const smileT = meditating ? 0.15 : st.reading ? (t - st.revealAt < 8 ? st.revealSmile : 0.45) : st.talking ? 0.35 : 0.28;
+    face.smile += (smileT - face.smile) * (1 - Math.exp(-dt * 2.5)); face.shut += ((meditating ? 1 : 0) - face.shut) * (1 - Math.exp(-dt * 3));
+    const fq = [Math.round(Math.max(1 - bl, lidDrop, face.shut * 0.97) * 8) / 8, Math.round(face.open * 6) / 6, Math.round(clamp(sacc.x * 5, -0.6, 0.6) * 6) / 6, Math.round(clamp(sacc.y * 5 - headPitch * 1.3, -0.8, 0.5) * 6) / 6, Math.round(face.smile * 10) / 10];
     if (fq.some((v, i) => v !== face.q[i]) && t - face.at > 0.05) { face.q = fq; face.at = t; drawFace(...fq); }
     mira.ears.forEach((e, i) => { e.rotation.z = Math.sin(t * 2 + i) * 0.12 + headYaw * -0.3; });
     mira.arms.forEach((a) => {

@@ -17,7 +17,7 @@ export async function GET(req) {
   const picked = r.cards[r.picked];
   const stream = readingStream({
     question: r.question, card: DECK[picked.index], reversed: picked.reversed, name: u.displayName,
-    others: r.cards.filter((_, i) => i !== r.picked), seed: r.id,
+    others: r.cards.filter((_, i) => i !== r.picked), seed: r.id, profile: u.profile,
     onDone: (text) => saveReadingText(r.id, text),
   });
   return new Response(stream, { headers });

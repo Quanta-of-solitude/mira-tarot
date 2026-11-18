@@ -3,12 +3,19 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { signIn, signOut } from "next-auth/react";
 import { DECK } from "@/lib/tarot";
 import { audio } from "@/lib/audio";
+import { RELATIONSHIP } from "@/lib/profile";
+import { chart } from "@/lib/astro";
 
 const CHIPS = ["Should I change my job this year?", "What does my love life need right now?", "Will my finances improve soon?", "What should I focus on today?"];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const post = (url, body) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
 const rupees = (paise) => `₹${Math.round(paise / 100)}`;
 const any = (arr) => arr[Math.floor(Math.random() * arr.length)];
+const EMPTY_PROFILE = { name: "", dob: "", birthPlace: "", city: "", work: "", relationship: "" };
+const needsProfile = (u) => !!u && (!u.name || !u.profile?.dob);
+// Reading text: a paragraph that starts with a known label ("When:", "What to do:"...) shows the label in bold.
+const LABEL = /^(Answer|Why I read it this way|When|What to do|Watch for|My guidance(?:, [^:]+)?):\s*/;
+const Para = ({ text }) => { const m = text.match(LABEL); return m ? <p><b>{m[1]}:</b> {text.slice(m[0].length)}</p> : <p>{text}</p>; };
 
 // Mira never says the same thing every time.
 const LINES = {
@@ -30,10 +37,11 @@ export default function TarotRoom() {
   const [phase, setPhaseState] = useState("loading"); const phaseRef = useRef("loading");
   const setPhase = (p) => { phaseRef.current = p; setPhaseState(p); };
   const [line, setLine] = useState(""), [sound, setSound] = useState(false);
-  const [question, setQuestion] = useState(""), [nameInput, setNameInput] = useState(""), [emailIn, setEmailIn] = useState(""), [codeIn, setCodeIn] = useState(""), [codeSent, setCodeSent] = useState(false), [devCode, setDevCode] = useState(""), [phone, setPhone] = useState(""), [keyMode, setKeyMode] = useState(false), [keyIn, setKeyIn] = useState("");
+  const [question, setQuestion] = useState(""), [emailIn, setEmailIn] = useState(""), [codeIn, setCodeIn] = useState(""), [codeSent, setCodeSent] = useState(false), [devCode, setDevCode] = useState(""), [phone, setPhone] = useState(""), [keyMode, setKeyMode] = useState(false), [keyIn, setKeyIn] = useState("");
   const [reading, setReading] = useState(null), [modal, setModal] = useState(null), [notice, setNotice] = useState("");
   const [history, setHistory] = useState(null), [breathIn, setBreathIn] = useState(false), [busy, setBusy] = useState(false);
   const [force, setForce] = useState({ index: "", orient: "", ritual: "on" });
+  const [prof, setProf] = useState(EMPTY_PROFILE);
   const run = useRef(0), readingId = useRef(null), sayTok = useRef(0), queue = useRef(Promise.resolve()), skipBreath = useRef(null), meRef = useRef(null), forceRef = useRef(force);
   meRef.current = me; forceRef.current = force;
 
@@ -87,19 +95,29 @@ export default function TarotRoom() {
     setSound(withSound); audio.setSound(withSound); sceneRef.current.enter(); setPhase("entering");
     await sleep(1500);
     const u = meRef.current;
-    if (u && !u.name) { setPhase("name"); say("Welcome, seeker. I am Mira. Before we begin, what shall I call you?"); return; }
+    if (needsProfile(u)) { setPhase("ask"); openProfile("Welcome, seeker. I am Mira. Before the cards can speak to you, tell me who you are."); return; }
     setPhase("ask");
     if (u?.name && u.lastCard) say(`Welcome back, ${u.name}. Last time, the cards showed you ${u.lastCard}. What weighs on you tonight?`);
     else if (u?.name) say(`Welcome, ${u.name}. Ask the one question that sits heavy on your heart.`);
     else say("Welcome, seeker. I am Mira. Sit with me a while, and ask the one question that sits heavy on your heart.");
   }
 
-  async function saveName(e) {
-    e.preventDefault(); if (busy) return; setBusy(true);
-    const res = await post("/api/me", { name: nameInput }); const d = await res.json(); setBusy(false);
-    if (!res.ok) { say(d.error || "Tell me a name I can call you."); return; }
-    setMe((m) => ({ ...m, name: d.user.name })); setPhase("ask");
-    say(`${d.user.name}. A name the cards will remember. Now, ask me your question.`);
+  function openProfile(line) {
+    const u = meRef.current, p = u?.profile || {};
+    setProf({ ...EMPTY_PROFILE, ...p, relationship: p.relationship || "", name: u?.name || "" });
+    setNotice(""); setModal("profile");
+    if (line) say(line);
+  }
+
+  async function saveProfile(e) {
+    e.preventDefault(); if (busy) return; setNotice(""); setBusy(true);
+    const res = await post("/api/me", { ...prof, relationship: prof.relationship || "private" }); const d = await res.json().catch(() => ({})); setBusy(false);
+    if (!res.ok) { setNotice(d.error || "Something went wrong. Try again."); return; }
+    setMe((m) => ({ ...m, name: d.user.name, profile: d.user.profile })); setModal(null);
+    if (phaseRef.current !== "ask") return;
+    const c = chart(d.user.profile);
+    const bc = c.birthCards.map((i) => DECK[i].name).join(" and ");
+    say(`${d.user.name}. Born under ${c.sun.name}, ${/^[aeiou]/.test(c.sun.element) ? "an" : "a"} ${c.sun.element} sign, on a life path of ${c.lifePath}. Your birth card${c.birthCards.length > 1 ? "s are" : " is"} ${bc}. Now I know who sits across from me. Ask your question.`);
   }
 
   async function ask(e) {
@@ -110,6 +128,7 @@ export default function TarotRoom() {
       try { sessionStorage.setItem("mira_q", q); } catch { /* storage blocked */ }
       setModal("signin"); say("Before I shuffle, tell me who sits across from me."); return;
     }
+    if (needsProfile(meRef.current)) { openProfile("One moment. The cards read you through your birth date. Tell me about yourself first."); return; }
     setBusy(true); const res = await post("/api/reading/start", { question: q }); const d = await res.json().catch(() => ({})); setBusy(false);
     if (res.status === 401) { setModal("signin"); return; }
     if (res.status === 402) { openPaywall(); return; }
@@ -259,7 +278,7 @@ export default function TarotRoom() {
     if (!r || r.error) { setNotice("That email and admin key don't match."); return; }
     setKeyIn(""); setKeyMode(false);
     const d = await loadMe(); setModal(null);
-    if (d.user && !d.user.name) { setPhase("name"); say("Welcome home. What shall I call you?"); }
+    if (needsProfile(d.user)) openProfile("Welcome home. Tell me about yourself, so the cards can read you properly.");
     else say(`Welcome back, ${d.user?.name || "seeker"}. The deck is open to you without limit.`);
   }
 
@@ -268,7 +287,7 @@ export default function TarotRoom() {
     const r = await signIn("email-code", { email: emailIn, code: codeIn, redirect: false }); setBusy(false);
     if (!r || r.error) { setNotice("That code didn't match, or it has expired. Check it, or send a new one."); return; }
     const d = await loadMe(); setModal(null); setCodeSent(false); setDevCode("");
-    if (d.user && !d.user.name) { setPhase("name"); say("And what shall I call you?"); }
+    if (needsProfile(d.user)) openProfile("Welcome. Tell me about yourself, so the cards can read you properly.");
     else say(d.user?.name ? `Welcome back, ${d.user.name}. Ask, and I will shuffle.` : "Good. Now ask, and I will shuffle.");
   }
 
@@ -286,6 +305,7 @@ export default function TarotRoom() {
           <div className="hud">
             {admin && <button className="adminbadge" onClick={() => setModal(modal === "admin" ? null : "admin")}>ADMIN</button>}
             <button className="pill" onClick={() => (me ? setModal("paywall") : setModal("signin"))} title="Get more readings">{creditLabel}</button>
+            {me && <button className="iconbtn" onClick={() => openProfile()}>Your details</button>}
             {me && <button className="iconbtn" onClick={openJournal}>Journal</button>}
             <button className="iconbtn" aria-pressed={sound} onClick={toggleSound}>{sound ? "Sound on" : "Sound off"}</button>
             {me ? <button className="iconbtn" onClick={() => signOut()}>Sign out</button> : phase !== "intro" && phase !== "loading" && <button className="iconbtn" onClick={() => setModal("signin")}>Sign in</button>}
@@ -295,14 +315,6 @@ export default function TarotRoom() {
         <div className="bottom">
           <div className="subtitle" aria-live="polite"><div className="who">MIRA</div><p id="speech" key={line}>{line}</p></div>
 
-          {phase === "name" && (
-            <form className="dock" onSubmit={saveName} autoComplete="off">
-              <div className="ask">
-                <input id="nm" maxLength={30} placeholder="Your name" value={nameInput} onChange={(e) => setNameInput(e.target.value)} aria-label="Your name" autoFocus />
-                <button className="cta" type="submit" disabled={busy}>That&apos;s me</button>
-              </div>
-            </form>
-          )}
           {phase === "ask" && (
             <form className="dock" onSubmit={ask} autoComplete="off">
               <div className="ask">
@@ -333,7 +345,7 @@ export default function TarotRoom() {
           <h2>{reading.card.name}</h2>
           <span className="tag">{reading.reversed ? "REVERSED" : "UPRIGHT"}</span>
           <p className="kw">{reading.card.kw.toUpperCase()}</p>
-          <div className="rtext">{reading.text ? reading.text.split(/\n+/).map((p, i) => <p key={i}>{p}</p>) : <p className="waiting">Mira studies the card…</p>}</div>
+          <div className="rtext">{reading.text ? reading.text.split(/\n+/).map((p, i) => <Para key={i} text={p} />) : <p className="waiting">Mira studies the card…</p>}</div>
           {reading.done && <button className="cta" onClick={askAgain}>Ask another question</button>}
           <p className="disclaim">For reflection and entertainment.</p>
         </aside>
@@ -421,6 +433,39 @@ export default function TarotRoom() {
         </div></div>
       )}
 
+      {modal === "profile" && (
+        <div className="veil" role="dialog" aria-modal="true" aria-labelledby="pfT"><div className="offer profile">
+          <h3 id="pfT">Tell Mira about yourself</h3>
+          <p className="note">Mira reads your card through your birth date (sun sign, numerology and birth cards) and the life you are living now. Only you can see these details.</p>
+          <form className="pform" onSubmit={saveProfile} autoComplete="on">
+            <label><span>Your name <b className="req" aria-hidden="true">*</b></span>
+              <input id="pf-name" maxLength={30} autoComplete="given-name" value={prof.name} onChange={(e) => setProf({ ...prof, name: e.target.value })} autoFocus />
+            </label>
+            <label><span>Date of birth <b className="req" aria-hidden="true">*</b></span>
+              <input id="pf-dob" type="date" min="1920-01-01" max={new Date().toISOString().slice(0, 10)} autoComplete="bday" value={prof.dob} onChange={(e) => setProf({ ...prof, dob: e.target.value })} />
+            </label>
+            <label>Where you were born
+              <input id="pf-bp" maxLength={60} placeholder="City or town" value={prof.birthPlace} onChange={(e) => setProf({ ...prof, birthPlace: e.target.value })} />
+            </label>
+            <label>Where you live now
+              <input id="pf-city" maxLength={60} autoComplete="address-level2" placeholder="City" value={prof.city} onChange={(e) => setProf({ ...prof, city: e.target.value })} />
+            </label>
+            <label>Your work
+              <input id="pf-work" maxLength={60} autoComplete="organization-title" placeholder="e.g. teacher, student, engineer" value={prof.work} onChange={(e) => setProf({ ...prof, work: e.target.value })} />
+            </label>
+            <label>Relationship
+              <select id="pf-rel" value={prof.relationship} onChange={(e) => setProf({ ...prof, relationship: e.target.value })}>
+                <option value="">Choose…</option>
+                {RELATIONSHIP.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+              </select>
+            </label>
+            <button className="cta" type="submit" disabled={busy || !prof.name.trim() || !prof.dob}>{me?.profile?.dob ? "Save" : "This is me"}</button>
+          </form>
+          {notice && <p className="err">{notice}</p>}
+          {me?.profile?.dob && <button className="linkbtn" onClick={() => setModal(null)}>Close</button>}
+        </div></div>
+      )}
+
       {modal === "journal" && (
         <div className="veil" role="dialog" aria-modal="true" aria-labelledby="jT"><div className="offer journal">
           <h3 id="jT">Your journal</h3>
@@ -429,7 +474,7 @@ export default function TarotRoom() {
           {history && history.map((h) => (
             <details key={h.id}>
               <summary><b>{h.card}{h.reversed ? " (reversed)" : ""}</b><span>{new Date(h.createdAt).toLocaleDateString("en-IN", { day: "numeric", month: "short" })} · {h.question}</span></summary>
-              {(h.text || "This reading was not finished.").split(/\n+/).map((p, i) => <p key={i}>{p}</p>)}
+              {(h.text || "This reading was not finished.").split(/\n+/).map((p, i) => <Para key={i} text={p} />)}
             </details>
           ))}
           <button className="linkbtn" onClick={() => setModal(null)}>Close</button>
