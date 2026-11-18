@@ -6,6 +6,7 @@ import { validateProfile } from "@/lib/profile";
 import { emailEnabled } from "@/lib/email";
 import { paymentConfig } from "@/lib/payments";
 import { PACKS, DECK } from "@/lib/tarot";
+import { site } from "@/lib/site";
 
 const pub = (u, last) => u && {
   email: u.email, name: u.displayName || null, image: u.image, credits: u.credits, isAdmin: u.isAdmin, profile: u.profile || null,
@@ -26,7 +27,7 @@ export async function GET() {
       packs: Object.values(PACKS),
       payment: paymentConfig(),
       emailEnabled, adminKey: !!process.env.ADMIN_KEY, devCodes: !emailEnabled && process.env.NODE_ENV !== "production",
-      supportEmail: process.env.NEXT_PUBLIC_SUPPORT_EMAIL || null,
+      supportEmail: site.supportEmail,
     },
   });
 }

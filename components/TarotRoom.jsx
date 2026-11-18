@@ -372,7 +372,7 @@ export default function TarotRoom() {
             <button className="cta" disabled={phase !== "intro"} onClick={() => enter(true)}>Enter with sound</button>
             <button className="ghost" disabled={phase !== "intro"} onClick={() => enter(false)}>Enter quietly</button>
           </div>
-          <span className="small">{phase === "intro" ? "Best with headphones. Your first three readings are free." : "Lighting the candles…"}</span>
+          <span className="small">{phase === "intro" ? "Best with headphones. Your first three readings are free, then ₹149 for 5 questions." : "Lighting the candles…"}</span>
         </div></div>
       )}
       {phase === "nogl" && <div className="nogl"><p>This experience needs WebGL. Try a recent version of Chrome, Safari or Firefox.</p></div>}
@@ -501,7 +501,7 @@ export default function TarotRoom() {
         </div>
       )}
 
-      <footer className="legal"><a href="/terms">Terms</a><a href="/privacy">Privacy</a><a href="/refunds">Refunds</a><a href="/contact">Contact</a></footer>
+      <footer className="legal"><a href="/terms">Terms</a><a href="/privacy">Privacy</a><a href="/refunds">Refunds</a><a href="/delivery">Delivery</a><a href="/contact">Contact</a></footer>
     </>
   );
 }

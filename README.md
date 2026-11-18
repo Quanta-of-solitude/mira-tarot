@@ -50,8 +50,9 @@ When you open it to other people, add:
 - **Payments with Cashfree:** sign up at cashfree.com as an **Individual** with your personal PAN,
   Aadhaar (linked to your phone) and bank account; no GST or company is needed. Developers > API Keys
   gives `CASHFREE_APP_ID` and `CASHFREE_SECRET_KEY`. Test with the sandbox keys and `CASHFREE_ENV=sandbox`,
-  then switch to the production keys and `CASHFREE_ENV=production` once activated. Fill in the bracketed
-  details on `/terms`, `/privacy`, `/refunds` and `/contact` first, since Cashfree reviews the site.
+  then switch to the production keys and `CASHFREE_ENV=production` once activated. Set `BUSINESS_NAME`,
+  `BUSINESS_ADDRESS` and (optionally) `SUPPORT_EMAIL` and `BUSINESS_PHONE` first: they fill in `/terms`, `/privacy`,
+  `/refunds`, `/delivery` and `/contact`, which Cashfree reviews.
   In Developers > Webhooks, add `https://YOUR_DOMAIN/api/pay/webhook` for payment events.
   Razorpay still works as an alternative: set its keys and `PAYMENT_PROVIDER=razorpay`.
 
